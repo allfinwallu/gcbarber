@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/icon-192.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GC Barber - Kasir Barbershop Professional</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0a0a0a" />
+  </head>
+  <body class="bg-black text-white antialiased">
+    <div id="root"></div>
+    
+    <!-- ===================================== -->
+    <!-- EDIT PIN OWNER DI SINI -->
+    <!-- ===================================== -->
+    <script>
+      window.APP_CONFIG = {
+        OWNER_PIN: "1234"
+      };
+    </script>
+    
+    <script type="module" src="/src/main.jsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => console.log('ServiceWorker registered!'))
+            .catch(err => console.log('ServiceWorker error: ', err));
+        });
+      }
+    </script>
+    <audio id="notifSound" src="https://assets.mixkit.co/active_storage/sfx/2013/2013-preview.mp3" preload="auto"></audio>
+</body>
+</html>

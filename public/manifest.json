@@ -1,0 +1,16 @@
+{
+  "short_name": "RekapGC",
+  "name": "Rekap GC BANG ALL",
+  "icons": [
+    {
+      "src": "/logo_baru.jpg",
+      "type": "image/jpeg",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#000000",
+  "theme_color": "#f59e0b",
+  "display": "standalone"
+}
