@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Scissors, Users, DollarSign, Calendar, FileText, Settings, 
   LogOut, Plus, Minus, Trash2, Edit2, CheckCircle, Share2, Upload, 
@@ -26,6 +26,16 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [savings, setSavings] = useState([]);
+
+  // Pengaman klik ganda: selama satu simpanan masih dikirim, tekanan berikutnya diabaikan
+  const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const guarded = (fn) => async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true);
+    try { await fn(e); } finally { busyRef.current = false; setBusy(false); }
+  };
 
   // Kalkulator (tombol melayang, tersedia untuk owner & kapster)
   const [showCalc, setShowCalc] = useState(false);
@@ -221,7 +231,7 @@ export default function App() {
   };
 
 
-  const handleTransactionSubmit = async (e) => {
+  const handleTransactionSubmitRaw = async (e) => {
     e.preventDefault();
     playNotif();
     if (!selectedEmployee || selectedServiceList.length === 0) {
@@ -297,7 +307,7 @@ export default function App() {
     }
   };
 
-  const handleAddExpense = async (e) => {
+  const handleAddExpenseRaw = async (e) => {
     e.preventDefault();
     if (!expenseDesc || !expenseAmount) return;
     
@@ -335,16 +345,17 @@ export default function App() {
     if (data) setSavings(data);
   };
 
-  const handleAddSaving = async (e) => {
+  const handleAddSavingRaw = async (e) => {
     e.preventDefault();
-    const amount = parseFloat(e.target.savingAmount.value);
+    const formEl = e.target;
+    const amount = parseFloat(formEl.savingAmount.value);
     if (!amount) return;
     
     const newSav = { date: transactionDate, amount: amount };
     const { error } = await supabase.from('savings').insert([newSav]);
     if (error) alert('Gagal menyimpan tabungan: ' + error.message);
     else {
-      e.target.reset();
+      formEl.reset();
       await refreshSavings();
       alert('Detail menabung berhasil ditambahkan!');
     }
@@ -356,6 +367,10 @@ export default function App() {
     if (error) alert('Gagal menghapus: ' + error.message);
     else await refreshSavings();
   };
+
+  const handleTransactionSubmit = guarded(handleTransactionSubmitRaw);
+  const handleAddExpense = guarded(handleAddExpenseRaw);
+  const handleAddSaving = guarded(handleAddSavingRaw);
 
   const handleAddService = async (e) => {
     e.preventDefault();
@@ -1092,8 +1107,8 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button type="submit" className="w-full py-4 bg-amber-500 text-black font-black rounded-xl shadow-lg hover:bg-amber-400 transition text-sm uppercase tracking-wider">
-                      ✓ Catat Transaksi Selesai
+                    <button type="submit" disabled={busy} className="w-full py-4 bg-amber-500 text-black font-black rounded-xl shadow-lg hover:bg-amber-400 transition text-sm uppercase tracking-wider disabled:opacity-60">
+                      {busy ? 'Menyimpan...' : '✓ Catat Transaksi Selesai'}
                     </button>
                   </form>
                 </div>
@@ -1213,7 +1228,7 @@ export default function App() {
                 <form onSubmit={handleAddSaving} className="space-y-3 bg-black p-4 rounded-xl border border-neutral-800">
                   <p className="text-xs font-bold text-emerald-400">Setor Tabungan Ruko ({transactionDate})</p>
                   <input name="savingAmount" type="number" min="1" placeholder="Nominal (Rp)" className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" required />
-                  <button type="submit" className="w-full py-3 bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 hover:bg-emerald-500/30 transition text-xs">
+                  <button type="submit" disabled={busy} className="w-full py-3 bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 hover:bg-emerald-500/30 transition text-xs disabled:opacity-60">
                     + Simpan Tabungan
                   </button>
                 </form>
@@ -1281,7 +1296,7 @@ export default function App() {
                     className="w-full bg-neutral-900 border border-neutral-700 rounded-xl p-2.5 text-xs text-white outline-none"
                     required 
                   />
-                  <button type="submit" className="w-full py-3 bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 hover:bg-red-500/30 transition text-xs">
+                  <button type="submit" disabled={busy} className="w-full py-3 bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 hover:bg-red-500/30 transition text-xs disabled:opacity-60">
                     + Simpan Pengeluaran
                   </button>
                 </form>
@@ -1607,7 +1622,7 @@ export default function App() {
                         className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" 
                         required 
                       />
-                      <button type="submit" className="w-full py-3 bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 hover:bg-red-500/30 transition text-xs">
+                      <button type="submit" disabled={busy} className="w-full py-3 bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 hover:bg-red-500/30 transition text-xs disabled:opacity-60">
                         + Simpan Pengeluaran
                       </button>
                     </form>
