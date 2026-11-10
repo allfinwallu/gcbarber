@@ -26,6 +26,7 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [savings, setSavings] = useState([]);
+  const [deletedLog, setDeletedLog] = useState([]); // log transaksi yang dihapus (tabel deleted_transactions)
 
   // Pengaman klik ganda: selama satu simpanan masih dikirim, tekanan berikutnya diabaikan
   const busyRef = useRef(false);
@@ -148,6 +149,13 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (role !== 'owner') return;
+    refreshDeletedLog();
+    const id = setInterval(refreshDeletedLog, 30000);
+    return () => clearInterval(id);
+  }, [role]);
+
   const fetchData = async () => {
     setIsLoading(true);
     try {
@@ -169,28 +177,35 @@ export default function App() {
     }
   };
 
+  const refreshDeletedLog = async () => {
+    try {
+      const { data, error } = await supabase.from('deleted_transactions').select('*').order('created_at', { ascending: false });
+      if (!error && data) setDeletedLog(data);
+    } catch (e) { /* tabel belum dibuat: abaikan */ }
+  };
+
   const setupRealtimeSubscriptions = () => {
     const servicesSub = supabase.channel('public:services')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, payload => {
-        if (payload.eventType === 'INSERT') setServices(prev => [...prev, payload.new]);
+        if (payload.eventType === 'INSERT') setServices(prev => prev.some(x => x.id === payload.new.id) ? prev : [...prev, payload.new]);
         if (payload.eventType === 'DELETE') setServices(prev => prev.filter(s => s.id !== payload.old.id));
       }).subscribe();
 
     const txSub = supabase.channel('public:transactions')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, payload => {
-        if (payload.eventType === 'INSERT') setTransactions(prev => [payload.new, ...prev]);
+        if (payload.eventType === 'INSERT') setTransactions(prev => prev.some(x => x.id === payload.new.id) ? prev : [payload.new, ...prev]);
         if (payload.eventType === 'DELETE') setTransactions(prev => prev.filter(t => t.id !== payload.old.id));
       }).subscribe();
 
     const expSub = supabase.channel('public:expenses')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, payload => {
-        if (payload.eventType === 'INSERT') setExpenses(prev => [payload.new, ...prev]);
+        if (payload.eventType === 'INSERT') setExpenses(prev => prev.some(x => x.id === payload.new.id) ? prev : [payload.new, ...prev]);
         if (payload.eventType === 'DELETE') setExpenses(prev => prev.filter(e => e.id !== payload.old.id));
       }).subscribe();
 
     const savSub = supabase.channel('public:savings')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'savings' }, payload => {
-        if (payload.eventType === 'INSERT') setSavings(prev => [payload.new, ...prev]);
+        if (payload.eventType === 'INSERT') setSavings(prev => prev.some(x => x.id === payload.new.id) ? prev : [payload.new, ...prev]);
         if (payload.eventType === 'DELETE') setSavings(prev => prev.filter(s => s.id !== payload.old.id));
       }).subscribe();
 
@@ -285,14 +300,28 @@ export default function App() {
     }
   };
 
+  // Catat dulu ke log (siapa, kapan, alasan), baru hapus transaksinya.
+  const logAndDeleteTransaction = async (tx, reason, by) => {
+    const logRow = {
+      date: tx.date, employee: tx.employee, customer: tx.customer, service: tx.service,
+      amount: tx.amount, payment_method: tx.payment_method, transaction_time: tx.transaction_time,
+      reason, deleted_by: by, deleted_on: todayStr,
+    };
+    const { error: logErr } = await supabase.from('deleted_transactions').insert([logRow]);
+    const { error } = await supabase.from('transactions').delete().eq('id', tx.id);
+    if (!error) setTransactions(prev => prev.filter(t => t.id !== tx.id));
+    refreshDeletedLog();
+    return { error, logErr };
+  };
+
   const handleDeleteTransaction = async (tx) => {
     if (role === 'owner') {
       const confirmDelete = window.confirm(`Owner: Yakin ingin menghapus transaksi atas nama "${tx.customer}" (${tx.service} - Rp ${tx.amount.toLocaleString()})?`);
       if (!confirmDelete) return;
 
-      const { error } = await supabase.from('transactions').delete().eq('id', tx.id);
+      const { error, logErr } = await logAndDeleteTransaction(tx, 'Dihapus oleh owner', 'OWNER');
       if (error) alert('Gagal menghapus: ' + error.message);
-      else alert('Transaksi berhasil dihapus oleh Owner.');
+      else alert('Transaksi berhasil dihapus oleh Owner.' + (logErr ? '\n(Catatan: log penghapusan belum tersimpan, jalankan SQL log dulu.)' : ''));
     } else if (role === 'karyawan') {
       const reason = prompt('Masukkan ALASAN mengapa transaksi ini harus dihapus (wajib diisi):');
       if (reason === null) return;
@@ -301,7 +330,7 @@ export default function App() {
         return;
       }
 
-      const { error } = await supabase.from('transactions').delete().eq('id', tx.id);
+      const { error } = await logAndDeleteTransaction(tx, reason.trim(), 'KAPSTER');
       if (error) alert('Gagal menghapus: ' + error.message);
       else alert(`Transaksi berhasil dihapus.\nAlasan: "${reason}"`);
     }
@@ -1414,6 +1443,31 @@ export default function App() {
                       </table>
                     </div>
                   </div>
+
+                  {(() => {
+                    const dl = deletedLog.filter(r => expInRange({ date: r.deleted_on }, posFilter, selectedDate));
+                    return (
+                      <div className="bg-[#141414] border border-red-500/30 rounded-2xl p-5 shadow-xl space-y-3">
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-sm font-bold text-red-400 flex items-center gap-2"><Trash2 size={15} /> Transaksi Dihapus ({posFilter.toUpperCase()})</h3>
+                          <span className="text-xs font-bold text-red-400 bg-red-500/10 px-3 py-1 rounded-full">{dl.length} data</span>
+                        </div>
+                        {dl.length === 0 ? (
+                          <p className="text-xs text-neutral-500">Tidak ada transaksi yang dihapus pada periode ini.</p>
+                        ) : dl.map(r => (
+                          <div key={r.id} className="bg-black border border-neutral-800 rounded-xl p-3 space-y-1 text-xs">
+                            <div className="flex justify-between">
+                              <span className="font-bold text-white uppercase">{r.employee} • <span className="text-amber-400 normal-case">{r.service}</span></span>
+                              <span className="font-black text-red-400">Rp {Number(r.amount).toLocaleString()}</span>
+                            </div>
+                            <p className="text-neutral-400">Transaksi: {r.date} {r.transaction_time || ''} • {r.payment_method} • Pelanggan: {r.customer || '-'}</p>
+                            <p className="text-neutral-400">Dihapus: {r.deleted_on} {r.created_at ? new Date(r.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : ''} oleh <b className="text-white">{r.deleted_by}</b></p>
+                            <p className="text-red-300">Alasan: {r.reason}</p>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })()}
