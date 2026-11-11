@@ -800,6 +800,84 @@ export default function App() {
     );
   };
 
+  // Alasan pengeluaran = keterangan tanpa awalan [NAMA] / [NAMA|QRIS]
+  const expReason = (e) => (e.description || '').replace(/^\[[^\]]*\]\s*/, '');
+
+  // Tabel hitungan uang di laci per kapster (allfin, molan, dst) + kolom TOTAL.
+  // Alur: total pendapatan (tunai + QRIS) → dikurangi pendapatan QRIS → dikurangi pengeluaran → dikurangi tabungan → uang tunai di laci.
+  // Pengeluaran yang dikurangkan = pengeluaran TUNAI (yang dibayar QRIS tidak keluar dari laci).
+  // Tabungan tidak dicatat per kapster, jadi hanya mengurangi di kolom TOTAL.
+  const renderKapsterLaciTable = (title, type, refStr) => {
+    const tx = transactions.filter(t => txInRange(t, type, refStr));
+    const ex = expenses.filter(e => expInRange(e, type, refStr));
+    const tab = savings.filter(x => expInRange(x, type, refStr)).reduce((sm, x) => sm + x.amount, 0);
+    const sum = (arr) => arr.reduce((a, x) => a + x.amount, 0);
+    const calc = (txList, exList, tabungan) => {
+      const inT = sum(txList.filter(t => t.payment_method !== 'QRIS'));
+      const inQ = sum(txList.filter(t => t.payment_method === 'QRIS'));
+      const outT = sum(exList.filter(e => expMethod(e) === 'Tunai'));
+      const outQ = sum(exList.filter(e => expMethod(e) === 'QRIS'));
+      return { total: inT + inQ, inQ, outT, outQ, tabungan, laci: inT + inQ - inQ - outT - tabungan };
+    };
+    const cols = employees.filter(e => e.active).map(emp => ({
+      key: emp.name,
+      label: emp.name.toUpperCase(),
+      d: calc(
+        tx.filter(t => (t.employee || '').toLowerCase() === emp.name.toLowerCase()),
+        ex.filter(e => expSpender(e) === emp.name.toUpperCase()),
+        null
+      ),
+    }));
+    const ownerEx = ex.filter(e => expSpender(e) === 'OWNER');
+    if (ownerEx.length > 0) cols.push({ key: '__owner', label: 'OWNER', d: calc([], ownerEx, null) });
+    const totalD = calc(tx, ex, tab);
+    cols.push({ key: '__total', label: 'TOTAL', d: totalD, isTotal: true });
+
+    const rp = (n) => `Rp ${n.toLocaleString()}`;
+    const rows = [
+      { l: 'Total pendapatan (tunai + QRIS)', f: d => rp(d.total), c: 'text-amber-400' },
+      { l: '− Pendapatan QRIS', f: d => `− ${rp(d.inQ)}`, c: 'text-sky-400' },
+      { l: '− Pengeluaran (tunai)', f: d => `− ${rp(d.outT)}`, c: 'text-red-400' },
+      { l: '− Tabungan ruko', f: d => (d.tabungan === null ? '-' : `− ${rp(d.tabungan)}`), c: 'text-red-400' },
+    ];
+    return (
+      <div className="bg-[#141414] border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-3">
+        <h3 className="text-sm font-bold text-emerald-400 flex items-center gap-2"><Banknote size={16} /> {title}</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-neutral-400 text-right">
+                <th className="py-2 text-left font-bold">Perhitungan</th>
+                {cols.map(c => (
+                  <th key={c.key} className={`py-2 pl-3 font-black ${c.isTotal ? 'text-amber-400' : 'text-white'}`}>{c.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.l} className="border-t border-neutral-800">
+                  <td className="py-2 text-left text-neutral-400">{r.l}</td>
+                  {cols.map(c => (
+                    <td key={c.key} className={`py-2 pl-3 text-right font-bold whitespace-nowrap ${r.c}`}>{r.f(c.d)}</td>
+                  ))}
+                </tr>
+              ))}
+              <tr className="border-t-2 border-emerald-500/40">
+                <td className="py-3 text-left font-black text-neutral-200">UANG TUNAI DI LACI</td>
+                {cols.map(c => (
+                  <td key={c.key} className={`py-3 pl-3 text-right font-black whitespace-nowrap ${c.d.laci >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rp(c.d.laci)}</td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[10px] text-neutral-500">
+          Rumus: total pendapatan (tunai + QRIS) − pendapatan QRIS − pengeluaran tunai − tabungan = uang tunai di laci. Tabungan tidak dicatat per kapster, jadi hanya mengurangi di kolom TOTAL. Pengeluaran yang dibayar QRIS (Rp {totalD.outQ.toLocaleString()}) tidak mengurangi laci. Kolom OWNER muncul jika ada pengeluaran atas nama owner.
+        </p>
+      </div>
+    );
+  };
+
   const expSplit = (type, refStr) => {
     const list = expenses.filter(e => expInRange(e, type, refStr));
     const owner = list.filter(e => expSpender(e) === 'OWNER').reduce((sm, e) => sm + e.amount, 0);
@@ -1319,6 +1397,8 @@ export default function App() {
                   </div>
                 </div>
 
+                {renderKapsterLaciTable(`Hitungan Laci per Kapster (${activeDateForView})`, 'harian', activeDateForView)}
+
                 {renderLaciCard(`Uang di Laci Hari Ini (${activeDateForView})`, {
                   inT: totalTunai, inQ: totalQris, outT: todayExpTunai, outQ: totalExpenseAmount - todayExpTunai,
                   tab: savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0),
@@ -1433,7 +1513,7 @@ export default function App() {
                   </div>
                   <input 
                     type="text" 
-                    placeholder="Keterangan Pengeluaran (Cth: Beli Klem, Listrik)"
+                    placeholder="Alasan / Keterangan Pengeluaran (Cth: Beli Klem, Listrik)"
                     value={expenseDesc}
                     onChange={(e) => setExpenseDesc(e.target.value)}
                     className="w-full bg-neutral-900 border border-neutral-700 rounded-xl p-2.5 text-xs text-white outline-none"
@@ -1758,6 +1838,76 @@ export default function App() {
                     <p className="text-[10px] text-neutral-500">Harian = tanggal terpilih; Mingguan = 7 hari berakhir di tanggal terpilih; Bulanan = bulan dari tanggal terpilih.</p>
                   </div>
 
+                  {/* RINCIAN PENGELUARAN + ALASAN (harian / mingguan / bulanan) */}
+                  <div className="bg-[#141414] border border-red-500/30 rounded-2xl p-5 shadow-xl space-y-4">
+                    <div className="flex justify-between items-center flex-wrap gap-2">
+                      <h3 className="text-sm font-bold text-red-400 flex items-center gap-2">
+                        <Receipt size={16} /> Rincian Pengeluaran & Alasan ({kasFilter})
+                      </h3>
+                      <span className="text-xs font-bold text-red-400 bg-red-500/10 px-3 py-1 rounded-full">
+                        {kasFilteredExp.length} data • -Rp {kExp.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-neutral-400 text-left">
+                            <th className="py-2">Periode</th>
+                            <th className="py-2 text-right">Jumlah</th>
+                            <th className="py-2 text-right">Tunai</th>
+                            <th className="py-2 text-right">QRIS</th>
+                            <th className="py-2 text-right">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {['harian', 'mingguan', 'bulanan'].map(r => {
+                            const list = expenses.filter(e => expInRange(e, r, selectedDate));
+                            const tn = list.filter(e => expMethod(e) === 'Tunai').reduce((sm, e) => sm + e.amount, 0);
+                            const qr = list.filter(e => expMethod(e) === 'QRIS').reduce((sm, e) => sm + e.amount, 0);
+                            return (
+                              <tr key={r} className={`border-t border-neutral-800 ${r === kasFilter ? 'text-amber-400' : 'text-white'}`}>
+                                <td className="py-2 capitalize font-bold">{r}</td>
+                                <td className="py-2 text-right">{list.length}x</td>
+                                <td className="py-2 text-right">Rp {tn.toLocaleString()}</td>
+                                <td className="py-2 text-right">Rp {qr.toLocaleString()}</td>
+                                <td className="py-2 text-right font-bold text-red-400">Rp {(tn + qr).toLocaleString()}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="space-y-2">
+                      {kasFilteredExp.length === 0 ? (
+                        <p className="text-xs text-neutral-500 text-center py-3">Belum ada pengeluaran pada periode ini.</p>
+                      ) : (
+                        [...kasFilteredExp]
+                          .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.expense_time || '').localeCompare(a.expense_time || ''))
+                          .map(e => (
+                            <div key={e.id} className="bg-black border border-neutral-800 rounded-xl p-3 text-xs space-y-1">
+                              <div className="flex justify-between items-start gap-3">
+                                <div className="space-y-1">
+                                  <p className="text-[10px] font-mono text-neutral-400">{e.date} • {e.expense_time || '-'}</p>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-bold text-white uppercase">{expSpender(e)}</span>
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${expMethod(e) === 'QRIS' ? 'bg-sky-500/20 text-sky-400' : 'bg-amber-500/20 text-amber-400'}`}>{expMethod(e)}</span>
+                                  </div>
+                                  <p className="text-neutral-300"><span className="text-neutral-500">Alasan:</span> {expReason(e) || '-'}</p>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className="font-black text-red-400">-Rp {e.amount.toLocaleString()}</span>
+                                  <button onClick={() => handleDeleteExpense(e)} className="p-1.5 bg-red-500/20 text-red-400 rounded-lg"><Trash2 size={13} /></button>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                    <p className="text-[10px] text-neutral-500">Mengikuti filter periode Kas di atas (harian / mingguan / bulanan) dan tanggal terpilih.</p>
+                  </div>
+
                   <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5 shadow-xl space-y-4">
                     <h3 className="text-sm font-bold text-white">Catat Pengeluaran Baru</h3>
                     <form onSubmit={handleAddExpense} className="space-y-3">
@@ -1792,7 +1942,7 @@ export default function App() {
                   </div>
                       <input 
                         type="text" 
-                        placeholder="Keterangan Pengeluaran" 
+                        placeholder="Alasan / Keterangan Pengeluaran" 
                         value={expenseDesc} 
                         onChange={(e) => setExpenseDesc(e.target.value)} 
                         className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" 
@@ -1948,6 +2098,8 @@ export default function App() {
                   const tab = savings.filter(x => expInRange(x, recapFilter, selectedDate)).reduce((sm, x) => sm + x.amount, 0);
                   return renderLaciCard(`Uang di Laci (${recapFilter})`, { inT: r.inT, inQ: r.inQ, outT: r.outT, outQ: r.outQ, tab });
                 })()}
+
+                {renderKapsterLaciTable(`Hitungan Laci per Kapster (${recapFilter})`, recapFilter, selectedDate)}
 
                 {/* WEEKLY TREND CHART */}
                 <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5 shadow-xl space-y-4">
