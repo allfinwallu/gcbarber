@@ -380,10 +380,14 @@ export default function App() {
     const amount = parseFloat(formEl.savingAmount.value);
     if (!amount) return;
     
-    const newSav = { date: transactionDate, amount: amount };
+    const saverName = (formEl.savingName?.value || '').trim();
+    const newSav = { date: transactionDate, amount: amount, saver_name: saverName || null };
     const { error } = await supabase.from('savings').insert([newSav]);
-    if (error) alert('Gagal menyimpan tabungan: ' + error.message);
-    else {
+    if (error) {
+      if (/saver_name/i.test(error.message || '')) {
+        alert('Kolom nama tabungan belum ada di database.\nJalankan SQL ini sekali di Supabase (SQL Editor):\n\nalter table savings add column if not exists saver_name text;');
+      } else alert('Gagal menyimpan tabungan: ' + error.message);
+    } else {
       formEl.reset();
       await refreshSavings();
       alert('Detail menabung berhasil ditambahkan!');
@@ -648,7 +652,7 @@ export default function App() {
     expData.push({});
     expData.push({ "Tanggal": "TOTAL PENGELUARAN", "Nominal": totalOut });
 
-    const savData = r.sav.map(x => ({ "Tanggal": x.date, "Nominal": x.amount }));
+    const savData = r.sav.map(x => ({ "Tanggal": x.date, "Nama": x.saver_name || "Umum", "Nominal": x.amount }));
     savData.push({});
     savData.push({ "Tanggal": "TOTAL SETORAN PERIODE", "Nominal": r.tabungan });
     savData.push({ "Tanggal": "TOTAL TERKUMPUL (SEMUA)", "Nominal": totalTabungan });
@@ -825,7 +829,7 @@ export default function App() {
       d: calc(
         tx.filter(t => (t.employee || '').toLowerCase() === emp.name.toLowerCase()),
         ex.filter(e => expSpender(e) === emp.name.toUpperCase()),
-        null
+        savings.filter(x => expInRange(x, type, refStr) && (x.saver_name || '').toLowerCase() === emp.name.toLowerCase()).reduce((sm, x) => sm + x.amount, 0)
       ),
     }));
     const ownerEx = ex.filter(e => expSpender(e) === 'OWNER');
@@ -872,7 +876,7 @@ export default function App() {
           </table>
         </div>
         <p className="text-[10px] text-neutral-500">
-          Rumus: total pendapatan (tunai + QRIS) − pendapatan QRIS − pengeluaran tunai − tabungan = uang tunai di laci. Tabungan tidak dicatat per kapster, jadi hanya mengurangi di kolom TOTAL. Pengeluaran yang dibayar QRIS (Rp {totalD.outQ.toLocaleString()}) tidak mengurangi laci. Kolom OWNER muncul jika ada pengeluaran atas nama owner.
+          Rumus: total pendapatan (tunai + QRIS) − pendapatan QRIS − pengeluaran tunai − tabungan = uang tunai di laci. Tabungan yang tanpa nama (Umum) hanya mengurangi kolom TOTAL. Pengeluaran yang dibayar QRIS (Rp {totalD.outQ.toLocaleString()}) tidak mengurangi laci. Kolom OWNER muncul jika ada pengeluaran atas nama owner.
         </p>
       </div>
     );
@@ -1009,6 +1013,118 @@ export default function App() {
     const expQris = empExp.filter(e => expMethod(e) === 'QRIS').reduce((sm, e) => sm + e.amount, 0);
     return { count: empTx.length, tunai, qris, services, addons, expTunai, expQris, expTotal: expTunai + expQris };
   };
+
+
+  // ---- Laporan gaya struk (per kapster / total) ----
+  const fmtId = (n) => Number(n || 0).toLocaleString('id-ID');
+  const ADDON_PRICE = { 'Keramas': 5000, 'Kumis & Jenggot': 5000, 'Hairtonix': 25000 };
+  // Pecah satu baris transaksi jadi layanan utama + tambahan beserta harganya
+  const parseTxPrices = (t) => {
+    const parts = (t.service || '').split('+');
+    const main = parts[0].trim();
+    const addons = [];
+    let addonTotal = 0;
+    parts.slice(1).join(',').split(',').map(x => x.trim()).filter(Boolean).forEach(a => {
+      const m = /^(.*?)\s*\((\d+)x\)$/.exec(a);
+      const name = m ? m[1].trim() : a;
+      const qty = m ? parseInt(m[2], 10) : 1;
+      const price = (ADDON_PRICE[name] || 0) * qty;
+      addons.push({ name, qty, price });
+      addonTotal += price;
+    });
+    return { main, mainPrice: (t.amount || 0) - addonTotal, addons };
+  };
+  // Kelompokkan: nama layanan = jumlah = total harga
+  const groupServiceLines = (list) => {
+    const map = {};
+    const add = (key, name, qty, price) => {
+      if (!map[key]) map[key] = { name, qty: 0, price: 0 };
+      map[key].qty += qty; map[key].price += price;
+    };
+    list.forEach(t => {
+      const { main, mainPrice, addons } = parseTxPrices(t);
+      if (main) add('s:' + main, main, 1, mainPrice);
+      addons.forEach(a => add('a:' + a.name, a.name, a.qty, a.price));
+    });
+    return Object.values(map);
+  };
+  // Susun baris-baris struk. Hasil: array { t: teks, c: kelas warna, b: tebal }
+  const buildReceiptLines = (title, txList, expList, savList) => {
+    const sum = (arr) => arr.reduce((a, x) => a + (x.amount || 0), 0);
+    const out = [];
+    out.push({ t: title.toUpperCase(), c: 'text-white', b: true });
+    out.push({ t: '' });
+    const all = groupServiceLines(txList);
+    if (all.length === 0) out.push({ t: 'Belum ada layanan.', c: 'text-neutral-500' });
+    all.forEach(l => out.push({ t: `${l.name} = ${l.qty} = ${fmtId(l.price)}` }));
+    const totalAll = sum(txList);
+    out.push({ t: '' });
+    out.push({ t: `Total = ${fmtId(totalAll)}`, c: 'text-amber-400', b: true });
+
+    const qrisTx = txList.filter(t => t.payment_method === 'QRIS');
+    const totalQris = sum(qrisTx);
+    if (qrisTx.length > 0) {
+      out.push({ t: '' });
+      out.push({ t: `Qris = ${qrisTx.length}`, c: 'text-sky-400', b: true });
+      groupServiceLines(qrisTx).forEach(l => out.push({ t: `${l.name} = ${l.qty} = ${fmtId(l.price)}`, c: 'text-sky-300' }));
+      out.push({ t: `Total ${fmtId(totalQris)}`, c: 'text-sky-400', b: true });
+    }
+    const tunaiMasuk = totalAll - totalQris;
+    out.push({ t: '' });
+    out.push({ t: qrisTx.length > 0 ? `Total = ${fmtId(totalAll)} - ${fmtId(totalQris)} = ${fmtId(tunaiMasuk)}` : `Total tunai = ${fmtId(tunaiMasuk)}`, b: true });
+
+    const expTunai = expList.filter(e => expMethod(e) === 'Tunai');
+    const expQ = expList.filter(e => expMethod(e) === 'QRIS');
+    if (expList.length > 0) {
+      out.push({ t: '' });
+      out.push({ t: 'Pengeluaran', c: 'text-red-400', b: true });
+      expList.forEach(e => {
+        const who = expSpender(e);
+        out.push({ t: `${expReason(e) || '-'} (${who.toLowerCase()}) = ${fmtId(e.amount)}${expMethod(e) === 'QRIS' ? ' [QRIS]' : ''}`, c: 'text-red-300' });
+      });
+      out.push({ t: `Total pengeluaran tunai = ${fmtId(sum(expTunai))}`, c: 'text-red-400', b: true });
+      if (expQ.length > 0) out.push({ t: `Pengeluaran QRIS = ${fmtId(sum(expQ))} (tidak mengurangi tunai)`, c: 'text-neutral-500' });
+    }
+    if (savList.length > 0) {
+      out.push({ t: '' });
+      out.push({ t: 'Tabungan', c: 'text-emerald-400', b: true });
+      savList.forEach(sv => out.push({ t: `${sv.saver_name ? sv.saver_name.toLowerCase() : 'umum'} = ${fmtId(sv.amount)}`, c: 'text-emerald-300' }));
+    }
+    const outT = sum(expTunai), tab = sum(savList);
+    const akhir = tunaiMasuk - outT - tab;
+    let rumus = `Tunai total = ${fmtId(tunaiMasuk)}`;
+    if (expTunai.length > 0) rumus += ` - pengeluaran ${fmtId(outT)}`;
+    if (savList.length > 0) rumus += ` - tabungan ${fmtId(tab)}`;
+    rumus += ` = ${fmtId(akhir)}`;
+    out.push({ t: '' });
+    out.push({ t: rumus, c: akhir >= 0 ? 'text-emerald-400' : 'text-red-400', b: true });
+    return out;
+  };
+  const receiptForEmployee = (empName, dateStr) => {
+    const tx = transactions.filter(t => (t.employee || '').toLowerCase() === empName.toLowerCase() && t.date === dateStr);
+    const ex = expenses.filter(e => e.date === dateStr && expSpender(e) === empName.toUpperCase());
+    const sv = savings.filter(x => x.date === dateStr && (x.saver_name || '').toLowerCase() === empName.toLowerCase());
+    return buildReceiptLines(empName, tx, ex, sv);
+  };
+  const receiptForAll = (dateStr) => buildReceiptLines(
+    `Total semua kapster (${dateStr})`,
+    transactions.filter(t => t.date === dateStr),
+    expenses.filter(e => e.date === dateStr),
+    savings.filter(x => x.date === dateStr)
+  );
+  const copyReceipt = async (lines) => {
+    const text = lines.map(l => l.t).join('\n');
+    try { await navigator.clipboard.writeText(text); alert('Laporan disalin!'); }
+    catch (err) { window.prompt('Salin laporan ini:', text); }
+  };
+  const renderReceipt = (lines) => (
+    <div className="bg-[#141414] rounded-lg p-3 space-y-0.5">
+      {lines.map((l, i) => l.t === ''
+        ? <div key={i} className="h-2" />
+        : <p key={i} className={`text-xs leading-snug ${l.b ? 'font-bold' : 'font-medium'} ${l.c || 'text-neutral-200'}`}>{l.t}</p>)}
+      <button onClick={() => copyReceipt(lines)} className="mt-3 w-full py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-[11px] font-bold text-neutral-300 transition">Salin laporan</button>
+    </div>
+  );
 
   const getWeeklyTrend = () => {
     const days = [];
@@ -1314,28 +1430,10 @@ export default function App() {
                 {/* Hasil Kerja / Pendapatan Kapster (Otomatis Terkalkulasi untuk Kapster) */}
                 <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5 shadow-xl space-y-4">
                   <h3 className="text-sm font-bold text-white">Hasil Kerja & Pendapatan Anda Hari Ini</h3>
-                  {(() => {
-                    const expQ = totalExpenseAmount - todayExpTunai;
-                    const Row = ({ l, v, c }) => (<div className="flex justify-between text-xs"><span className="text-neutral-400">{l}</span><span className={`font-bold ${c || 'text-white'}`}>Rp {v.toLocaleString()}</span></div>);
-                    return (
-                      <div className="bg-black border border-amber-500/30 rounded-xl p-4 space-y-2">
-                        <p className="text-xs font-bold text-amber-400">TOTAL SEMUA KAPSTER ({activeDateForView})</p>
-                        <Row l="Pendapatan Tunai" v={totalTunai} />
-                        <Row l="Pendapatan QRIS" v={totalQris} />
-                        <div className="border-t border-neutral-800 pt-2"><Row l="Total Pendapatan" v={totalSales} c="text-amber-400" /></div>
-                        <Row l="Pengeluaran Tunai" v={todayExpTunai} c="text-red-400" />
-                        <Row l="Pengeluaran QRIS" v={expQ} c="text-red-400" />
-                        <div className="border-t border-neutral-800 pt-2"><Row l="Total Pengeluaran" v={totalExpenseAmount} c="text-red-400" /></div>
-                        <div className="border-t border-neutral-800 pt-2"><Row l="Pendapatan Bersih" v={totalSales - totalExpenseAmount} c="text-emerald-400" /></div>
-                        <Row l="Tabungan Ruko (setor hari ini)" v={savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0)} c="text-sky-400" />
-                        <p className="text-[10px] text-neutral-500">Setoran tabungan tidak dicatat per kapster. Hitungan uang di laci ada di kartu paling bawah.</p>
-                        <div className="grid grid-cols-2 gap-2 pt-1">
-                          <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih Tunai</span><p className="font-black text-emerald-400">Rp {(totalTunai - todayExpTunai).toLocaleString()}</p></div>
-                          <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih QRIS</span><p className="font-black text-emerald-400">Rp {(totalQris - expQ).toLocaleString()}</p></div>
-                        </div>
-                      </div>
-                    );
-                  })()}
+                  <div className="bg-black border border-amber-500/30 rounded-xl p-4 space-y-2">
+                    <p className="text-xs font-bold text-amber-400">TOTAL SEMUA KAPSTER ({activeDateForView})</p>
+                    {renderReceipt(receiptForAll(activeDateForView))}
+                  </div>
                   <div className="space-y-3">
                     {employees.filter(e => e.active).map(emp => {
                       const stats = getEmployeeStatsForDate(emp.name, activeDateForView);
@@ -1354,35 +1452,7 @@ export default function App() {
                               ✂️ {stats.count} kepala
                             </span>
                           </div>
-                          {(() => {
-                            const det = getEmployeeDetailForDate(emp.name, activeDateForView);
-                            const svcEntries = Object.entries(det.services);
-                            const addonEntries = Object.entries(det.addons);
-                            const Line = ({ l, v, c }) => (<div className="flex justify-between text-xs"><span className="text-neutral-400">{l}</span><span className={`font-bold ${c || 'text-white'}`}>{v}</span></div>);
-                            return (
-                              <div className="space-y-2 pt-1">
-                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
-                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Rincian layanan</p>
-                                  {svcEntries.length === 0 && <p className="text-xs text-neutral-500">Belum ada layanan.</p>}
-                                  {svcEntries.map(([n, q]) => <Line key={n} l={n} v={`${q}x`} />)}
-                                  {addonEntries.map(([n, q]) => <Line key={'a' + n} l={`+ ${n}`} v={`${q}x`} c="text-amber-400" />)}
-                                </div>
-                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
-                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Pendapatan</p>
-                                  <Line l="Tunai" v={`Rp ${det.tunai.toLocaleString()}`} />
-                                  <Line l="QRIS" v={`Rp ${det.qris.toLocaleString()}`} />
-                                  <div className="border-t border-neutral-800 pt-1"><Line l="Total pendapatan" v={`Rp ${(det.tunai + det.qris).toLocaleString()}`} c="text-amber-400" /></div>
-                                </div>
-                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
-                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Pengeluaran {emp.name}</p>
-                                  <Line l="Tunai" v={`Rp ${det.expTunai.toLocaleString()}`} c="text-red-400" />
-                                  <Line l="QRIS" v={`Rp ${det.expQris.toLocaleString()}`} c="text-red-400" />
-                                  <div className="border-t border-neutral-800 pt-1"><Line l="Total pengeluaran" v={`Rp ${det.expTotal.toLocaleString()}`} c="text-red-400" /></div>
-                                </div>
-                                <Line l="Bersih (pendapatan − pengeluaran)" v={`Rp ${(det.tunai + det.qris - det.expTotal).toLocaleString()}`} c="text-emerald-400" />
-                              </div>
-                            );
-                          })()}
+                          {renderReceipt(receiptForEmployee(emp.name, activeDateForView))}
                           <div className="flex justify-between items-center pt-2 border-t border-neutral-900 text-xs">
                             <span className="text-neutral-400">Total Omset:</span>
                             <span className="font-bold text-white">Rp {stats.total.toLocaleString()}</span>
@@ -1458,6 +1528,12 @@ export default function App() {
                 </div>
                 <form onSubmit={handleAddSaving} className="space-y-3 bg-black p-4 rounded-xl border border-neutral-800">
                   <p className="text-xs font-bold text-emerald-400">Setor Tabungan Ruko ({transactionDate})</p>
+                  <select name="savingName" defaultValue="" className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none capitalize">
+                    <option value="">Umum (tanpa nama)</option>
+                    {employees.map(emp => (
+                      <option key={emp.name} value={emp.name}>{emp.name.toUpperCase()}</option>
+                    ))}
+                  </select>
                   <input name="savingAmount" type="number" min="1" placeholder="Nominal (Rp)" className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" required />
                   <button type="submit" disabled={busy} className="w-full py-3 bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 hover:bg-emerald-500/30 transition text-xs disabled:opacity-60">
                     + Simpan Tabungan
@@ -1468,7 +1544,7 @@ export default function App() {
                   {savings.length === 0 && <p className="text-xs text-neutral-500">Belum ada setoran.</p>}
                   {savings.slice(0, 15).map(sv => (
                     <div key={sv.id} className="flex justify-between bg-black border border-neutral-800 rounded-xl px-3 py-2 text-xs">
-                      <span className="text-neutral-400">{sv.date}</span>
+                      <span className="text-neutral-400">{sv.date}{sv.saver_name && <b className="ml-2 text-white uppercase">{sv.saver_name}</b>}</span>
                       <span className="font-bold text-emerald-400">Rp {sv.amount.toLocaleString()}</span>
                     </div>
                   ))}
@@ -2213,7 +2289,7 @@ export default function App() {
                   {savings.length === 0 && <p className="text-xs text-neutral-500">Belum ada setoran.</p>}
                   {savings.slice(0, 30).map(sv => (
                     <div key={sv.id} className="flex justify-between items-center bg-black border border-neutral-800 rounded-xl px-3 py-2 text-xs">
-                      <span className="text-neutral-400">{sv.date}</span>
+                      <span className="text-neutral-400">{sv.date}{sv.saver_name && <b className="ml-2 text-white uppercase">{sv.saver_name}</b>}</span>
                       <span className="flex items-center gap-3">
                         <b className="text-emerald-400">Rp {sv.amount.toLocaleString()}</b>
                         <button onClick={() => handleDeleteSaving(sv)} className="text-red-400"><Trash2 size={14} /></button>
