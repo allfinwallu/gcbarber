@@ -841,6 +841,29 @@ export default function App() {
     return { count: empTx.length, total: totalOmset, summary: serviceSummaryStr };
   };
 
+  // Rincian lengkap per kapster untuk satu tanggal: jumlah tiap layanan, tambahan, tunai/QRIS, pengeluaran
+  const getEmployeeDetailForDate = (empName, dateStr) => {
+    const empTx = transactions.filter(t => (t.employee || '').toLowerCase() === empName.toLowerCase() && t.date === dateStr);
+    const services = {}, addons = {};
+    let tunai = 0, qris = 0;
+    empTx.forEach(t => {
+      if (t.payment_method === 'QRIS') qris += t.amount; else tunai += t.amount;
+      const parts = (t.service || '').split('+');
+      const main = parts[0].trim();
+      if (main) services[main] = (services[main] || 0) + 1;
+      parts.slice(1).join(',').split(',').map(x => x.trim()).filter(Boolean).forEach(a => {
+        const m = /^(.*?)\s*\((\d+)x\)$/.exec(a);
+        const name = m ? m[1].trim() : a;
+        const q = m ? parseInt(m[2], 10) : 1;
+        addons[name] = (addons[name] || 0) + q;
+      });
+    });
+    const empExp = expenses.filter(e => e.date === dateStr && expSpender(e) === empName.toUpperCase());
+    const expTunai = empExp.filter(e => expMethod(e) === 'Tunai').reduce((sm, e) => sm + e.amount, 0);
+    const expQris = empExp.filter(e => expMethod(e) === 'QRIS').reduce((sm, e) => sm + e.amount, 0);
+    return { count: empTx.length, tunai, qris, services, addons, expTunai, expQris, expTotal: expTunai + expQris };
+  };
+
   const getWeeklyTrend = () => {
     const days = [];
     for (let i = 6; i >= 0; i--) {
@@ -1158,6 +1181,9 @@ export default function App() {
                         <Row l="Pengeluaran QRIS" v={expQ} c="text-red-400" />
                         <div className="border-t border-neutral-800 pt-2"><Row l="Total Pengeluaran" v={totalExpenseAmount} c="text-red-400" /></div>
                         <div className="border-t border-neutral-800 pt-2"><Row l="Pendapatan Bersih" v={totalSales - totalExpenseAmount} c="text-emerald-400" /></div>
+                        <Row l="Tabungan Ruko (setor hari ini)" v={savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0)} c="text-sky-400" />
+                        <div className="border-t border-neutral-800 pt-2"><Row l="Sisa Tunai di Laci (setelah pengeluaran & tabungan)" v={totalTunai - todayExpTunai - savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0)} c="text-emerald-400" /></div>
+                        <p className="text-[10px] text-neutral-500">Tabungan dianggap disetor dari uang tunai. Setoran tabungan tidak dicatat per kapster.</p>
                         <div className="grid grid-cols-2 gap-2 pt-1">
                           <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih Tunai</span><p className="font-black text-emerald-400">Rp {(totalTunai - todayExpTunai).toLocaleString()}</p></div>
                           <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih QRIS</span><p className="font-black text-emerald-400">Rp {(totalQris - expQ).toLocaleString()}</p></div>
@@ -1183,11 +1209,35 @@ export default function App() {
                               ✂️ {stats.count} kepala
                             </span>
                           </div>
-                          {stats.summary && (
-                            <p className="text-xs text-neutral-300 pt-1">
-                              <span className="text-neutral-500 font-semibold">Layanan:</span> {stats.summary}
-                            </p>
-                          )}
+                          {(() => {
+                            const det = getEmployeeDetailForDate(emp.name, activeDateForView);
+                            const svcEntries = Object.entries(det.services);
+                            const addonEntries = Object.entries(det.addons);
+                            const Line = ({ l, v, c }) => (<div className="flex justify-between text-xs"><span className="text-neutral-400">{l}</span><span className={`font-bold ${c || 'text-white'}`}>{v}</span></div>);
+                            return (
+                              <div className="space-y-2 pt-1">
+                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
+                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Rincian layanan</p>
+                                  {svcEntries.length === 0 && <p className="text-xs text-neutral-500">Belum ada layanan.</p>}
+                                  {svcEntries.map(([n, q]) => <Line key={n} l={n} v={`${q}x`} />)}
+                                  {addonEntries.map(([n, q]) => <Line key={'a' + n} l={`+ ${n}`} v={`${q}x`} c="text-amber-400" />)}
+                                </div>
+                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
+                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Pendapatan</p>
+                                  <Line l="Tunai" v={`Rp ${det.tunai.toLocaleString()}`} />
+                                  <Line l="QRIS" v={`Rp ${det.qris.toLocaleString()}`} />
+                                  <div className="border-t border-neutral-800 pt-1"><Line l="Total pendapatan" v={`Rp ${(det.tunai + det.qris).toLocaleString()}`} c="text-amber-400" /></div>
+                                </div>
+                                <div className="bg-[#141414] rounded-lg p-3 space-y-1">
+                                  <p className="text-[11px] font-bold text-neutral-500 uppercase">Pengeluaran {emp.name}</p>
+                                  <Line l="Tunai" v={`Rp ${det.expTunai.toLocaleString()}`} c="text-red-400" />
+                                  <Line l="QRIS" v={`Rp ${det.expQris.toLocaleString()}`} c="text-red-400" />
+                                  <div className="border-t border-neutral-800 pt-1"><Line l="Total pengeluaran" v={`Rp ${det.expTotal.toLocaleString()}`} c="text-red-400" /></div>
+                                </div>
+                                <Line l="Bersih (pendapatan − pengeluaran)" v={`Rp ${(det.tunai + det.qris - det.expTotal).toLocaleString()}`} c="text-emerald-400" />
+                              </div>
+                            );
+                          })()}
                           <div className="flex justify-between items-center pt-2 border-t border-neutral-900 text-xs">
                             <span className="text-neutral-400">Total Omset:</span>
                             <span className="font-bold text-white">Rp {stats.total.toLocaleString()}</span>
