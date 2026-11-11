@@ -525,132 +525,172 @@ export default function App() {
     }
   };
 
+  // ---- Laporan lengkap untuk Excel & WhatsApp (periode: harian / mingguan / bulanan / semua) ----
+  const inRangeByDate = (dateStr, range) => {
+    if (range === 'semua') return true;
+    const now = new Date(selectedDate); const d = new Date(dateStr);
+    if (range === 'harian') return dateStr === selectedDate;
+    if (range === 'mingguan') { const st = new Date(now); st.setDate(now.getDate() - 6); return d >= st && d <= now; }
+    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+  };
+
+  const buildReport = (range) => {
+    const tx = transactions.filter(t => inRangeByDate(t.date, range));
+    const exp = expenses.filter(e => inRangeByDate(e.date, range));
+    const sav = savings.filter(x => inRangeByDate(x.date, range));
+    const sum = (arr) => arr.reduce((a, x) => a + x.amount, 0);
+    const inT = sum(tx.filter(t => t.payment_method !== 'QRIS')), inQ = sum(tx.filter(t => t.payment_method === 'QRIS'));
+    const outT = sum(exp.filter(e => expMethod(e) === 'Tunai')), outQ = sum(exp.filter(e => expMethod(e) === 'QRIS'));
+    const outOwner = sum(exp.filter(e => expSpender(e) === 'OWNER'));
+    const outKapster = sum(exp.filter(e => expSpender(e) !== 'OWNER'));
+    const tabungan = sum(sav);
+
+    const names = [...employees.map(e => e.name)];
+    tx.forEach(t => { if (t.employee && !names.some(n => n.toLowerCase() === t.employee.toLowerCase())) names.push(t.employee); });
+    const perKapster = names.map(name => {
+      const emp = employees.find(e => e.name.toLowerCase() === name.toLowerCase());
+      const etx = tx.filter(t => (t.employee || '').toLowerCase() === name.toLowerCase());
+      const eexp = exp.filter(e => expSpender(e) === name.toUpperCase());
+      const services = {}, addons = {};
+      etx.forEach(t => {
+        const parts = (t.service || '').split('+');
+        const main = parts[0].trim();
+        if (main) services[main] = (services[main] || 0) + 1;
+        parts.slice(1).join(',').split(',').map(x => x.trim()).filter(Boolean).forEach(ad => {
+          const m = /^(.*?)\s*\((\d+)x\)$/.exec(ad);
+          const nm = m ? m[1].trim() : ad; const q = m ? parseInt(m[2], 10) : 1;
+          addons[nm] = (addons[nm] || 0) + q;
+        });
+      });
+      const tunai = sum(etx.filter(t => t.payment_method !== 'QRIS')), qris = sum(etx.filter(t => t.payment_method === 'QRIS'));
+      const expTunai = sum(eexp.filter(e => expMethod(e) === 'Tunai')), expQris = sum(eexp.filter(e => expMethod(e) === 'QRIS'));
+      const ratio = emp ? emp.ratio : '-';
+      const pct = emp ? (parseFloat((emp.ratio || '').split('/')[0]) || 60) : 0;
+      return { name, count: etx.length, services, addons, tunai, qris, omset: tunai + qris, expTunai, expQris, expTotal: expTunai + expQris, ratio, share: ((tunai + qris) * pct) / 100 };
+    }).filter(k => k.count > 0 || k.expTotal > 0 || employees.some(e => e.name.toLowerCase() === k.name.toLowerCase() && e.active));
+    return { tx, exp, sav, inT, inQ, outT, outQ, outOwner, outKapster, tabungan, perKapster };
+  };
+
+  const fmtCounts = (obj, plus) => Object.entries(obj).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).map(([n, q]) => `${plus ? '+ ' : ''}${n} ${q}x`).join(', ');
+
   const exportToExcel = () => {
-    let filteredTx = [...transactions];
-    let filteredExp = [...expenses];
-    const now = new Date(selectedDate);
+    const r = buildReport(exportRange);
+    const totalIn = r.inT + r.inQ, totalOut = r.outT + r.outQ;
+    const periodLabel = exportRange === 'semua' ? 'Semua data' : `${exportRange} (acuan tanggal ${selectedDate})`;
 
-    if (exportRange === 'harian') {
-      filteredTx = transactions.filter(t => t.date === selectedDate);
-      filteredExp = expenses.filter(e => e.date === selectedDate);
-    } else if (exportRange === 'mingguan') {
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - 6);
-      filteredTx = transactions.filter(t => {
-        const d = new Date(t.date);
-        return d >= startOfWeek && d <= now;
-      });
-      filteredExp = expenses.filter(e => {
-        const d = new Date(e.date);
-        return d >= startOfWeek && d <= now;
-      });
-    } else if (exportRange === 'bulanan') {
-      const year = now.getFullYear();
-      const month = now.getMonth();
-      filteredTx = transactions.filter(t => {
-        const d = new Date(t.date);
-        return d.getFullYear() === year && d.getMonth() === month;
-      });
-      filteredExp = expenses.filter(e => {
-        const d = new Date(e.date);
-        return d.getFullYear() === year && d.getMonth() === month;
-      });
-    }
+    // Sheet 1: Ringkasan (tunai & QRIS dipisah)
+    const ringkasan = [
+      { "Keterangan": "LAPORAN REKAP GC BANG ALL", "Tunai": '', "QRIS": '', "Total": '' },
+      { "Keterangan": `Periode: ${periodLabel}`, "Tunai": '', "QRIS": '', "Total": '' },
+      {},
+      { "Keterangan": "Pendapatan (omset)", "Tunai": r.inT, "QRIS": r.inQ, "Total": totalIn },
+      { "Keterangan": "Pengeluaran", "Tunai": r.outT, "QRIS": r.outQ, "Total": totalOut },
+      { "Keterangan": "PENDAPATAN BERSIH", "Tunai": r.inT - r.outT, "QRIS": r.inQ - r.outQ, "Total": totalIn - totalOut },
+      {},
+      { "Keterangan": "Pengeluaran oleh Owner", "Tunai": '', "QRIS": '', "Total": r.outOwner },
+      { "Keterangan": "Pengeluaran oleh Kapster", "Tunai": '', "QRIS": '', "Total": r.outKapster },
+      {},
+      { "Keterangan": "Tabungan Ruko (setoran periode ini)", "Tunai": '', "QRIS": '', "Total": r.tabungan },
+      { "Keterangan": "Sisa Tunai (tunai - pengeluaran tunai - tabungan)", "Tunai": r.inT - r.outT - r.tabungan, "QRIS": '', "Total": '' },
+      { "Keterangan": "Jumlah transaksi (kepala)", "Tunai": '', "QRIS": '', "Total": r.tx.length },
+    ];
+    const wsRingkasan = XLSX.utils.json_to_sheet(ringkasan);
+    wsRingkasan['!cols'] = [{ wch: 52 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
 
-    const totalOmsetVal = filteredTx.reduce((sum, t) => sum + t.amount, 0);
-    const totalExpVal = filteredExp.reduce((sum, e) => sum + e.amount, 0);
-    const netIncomeVal = totalOmsetVal - totalExpVal;
-
-    // Prepare data with summary rows at the bottom
-    const txData = filteredTx.map(t => ({
-        "Tanggal": t.date,
-        "Jam": t.transaction_time || '-',
-        "Kapster": t.employee,
-        "Pelanggan": t.customer,
-        "Layanan": t.service,
-        "Nominal": t.amount,
-        "Pembayaran": t.payment_method
+    // Sheet 2: Per Kapster
+    const perK = r.perKapster.map(k => ({
+      "Kapster": k.name.toUpperCase(),
+      "Jumlah Kepala": k.count,
+      "Rincian Layanan": fmtCounts(k.services) || '-',
+      "Tambahan": fmtCounts(k.addons) || '-',
+      "Pendapatan Tunai": k.tunai,
+      "Pendapatan QRIS": k.qris,
+      "Total Omset": k.omset,
+      "Pengeluaran Tunai": k.expTunai,
+      "Pengeluaran QRIS": k.expQris,
+      "Total Pengeluaran": k.expTotal,
+      "Bersih": k.omset - k.expTotal,
+      "Skema": k.ratio,
+      "Estimasi Bagi Hasil": k.share,
     }));
-    
-    // Add summary rows to Transaction sheet
-    txData.push({});
-    txData.push({ "Tanggal": "TOTAL OMSET", "Nominal": totalOmsetVal });
-    txData.push({ "Tanggal": "TOTAL PENGELUARAN", "Nominal": totalExpVal });
-    txData.push({ "Tanggal": "PENDAPATAN BERSIH", "Nominal": netIncomeVal });
+    perK.push({});
+    perK.push({
+      "Kapster": "TOTAL", "Jumlah Kepala": r.tx.length, "Pendapatan Tunai": r.inT, "Pendapatan QRIS": r.inQ, "Total Omset": totalIn,
+      "Pengeluaran Tunai": r.perKapster.reduce((a, k) => a + k.expTunai, 0), "Pengeluaran QRIS": r.perKapster.reduce((a, k) => a + k.expQris, 0),
+      "Total Pengeluaran": r.perKapster.reduce((a, k) => a + k.expTotal, 0),
+    });
+    const wsPerK = XLSX.utils.json_to_sheet(perK);
+    wsPerK['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 40 }, { wch: 30 }, ...Array(9).fill({ wch: 18 })];
 
-    const expData = filteredExp.map(e => ({
-        "Tanggal": e.date,
-        "Jam": e.expense_time || '-',
-        "Keterangan": expText(e),
-        "Metode": expMethod(e),
-        "Nominal": e.amount
+    // Sheet 3: Rincian Layanan (kapster x layanan x jumlah)
+    const layanan = [];
+    r.perKapster.forEach(k => {
+      Object.entries(k.services).forEach(([n, q]) => layanan.push({ "Kapster": k.name.toUpperCase(), "Layanan": n, "Jumlah": q }));
+      Object.entries(k.addons).forEach(([n, q]) => layanan.push({ "Kapster": k.name.toUpperCase(), "Layanan": `+ ${n} (tambahan)`, "Jumlah": q }));
+    });
+    const wsLayanan = XLSX.utils.json_to_sheet(layanan.length ? layanan : [{ "Kapster": '-', "Layanan": '-', "Jumlah": 0 }]);
+    wsLayanan['!cols'] = [{ wch: 14 }, { wch: 34 }, { wch: 10 }];
+
+    // Sheet 4 & 5: Transaksi dan Pengeluaran (seperti sebelumnya)
+    const txData = r.tx.map(t => ({
+      "Tanggal": t.date, "Jam": t.transaction_time || '-', "Kapster": t.employee, "Pelanggan": t.customer,
+      "Layanan": t.service, "Nominal": t.amount, "Pembayaran": t.payment_method
+    }));
+    txData.push({});
+    txData.push({ "Tanggal": "TOTAL OMSET", "Nominal": totalIn });
+    txData.push({ "Tanggal": "TOTAL PENGELUARAN", "Nominal": totalOut });
+    txData.push({ "Tanggal": "PENDAPATAN BERSIH", "Nominal": totalIn - totalOut });
+
+    const expData = r.exp.map(e => ({
+      "Tanggal": e.date, "Jam": e.expense_time || '-', "Oleh": expSpender(e), "Keterangan": expText(e),
+      "Metode": expMethod(e), "Nominal": e.amount
     }));
     expData.push({});
-    expData.push({ "Tanggal": "TOTAL PENGELUARAN", "Nominal": totalExpVal });
+    expData.push({ "Tanggal": "TOTAL PENGELUARAN", "Nominal": totalOut });
 
-    const wsTx = XLSX.utils.json_to_sheet(txData);
-    const wsExp = XLSX.utils.json_to_sheet(expData);
+    const savData = r.sav.map(x => ({ "Tanggal": x.date, "Nominal": x.amount }));
+    savData.push({});
+    savData.push({ "Tanggal": "TOTAL SETORAN PERIODE", "Nominal": r.tabungan });
+    savData.push({ "Tanggal": "TOTAL TERKUMPUL (SEMUA)", "Nominal": totalTabungan });
+    savData.push({ "Tanggal": "TARGET", "Nominal": targetTabungan });
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, wsTx, "Transaksi");
-    XLSX.utils.book_append_sheet(wb, wsExp, "Pengeluaran");
-    
+    XLSX.utils.book_append_sheet(wb, wsRingkasan, "Ringkasan");
+    XLSX.utils.book_append_sheet(wb, wsPerK, "Per Kapster");
+    XLSX.utils.book_append_sheet(wb, wsLayanan, "Rincian Layanan");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txData), "Transaksi");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expData), "Pengeluaran");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(savData), "Tabungan");
+
     XLSX.writeFile(wb, `Laporan_RekapGCBangAll_${exportRange}_${selectedDate}.xlsx`);
   };
 
   const sendReportWA = () => {
-    let filteredTx = [...transactions];
-    let filteredExp = [...expenses];
-    const now = new Date(selectedDate);
-
-    if (exportRange === 'harian') {
-      filteredTx = transactions.filter(t => t.date === selectedDate);
-      filteredExp = expenses.filter(e => e.date === selectedDate);
-    } else if (exportRange === 'mingguan') {
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - 6);
-      filteredTx = transactions.filter(t => {
-        const d = new Date(t.date);
-        return d >= startOfWeek && d <= now;
-      });
-      filteredExp = expenses.filter(e => {
-        const d = new Date(e.date);
-        return d >= startOfWeek && d <= now;
-      });
-    } else if (exportRange === 'bulanan') {
-      const year = now.getFullYear();
-      const month = now.getMonth();
-      filteredTx = transactions.filter(t => {
-        const d = new Date(t.date);
-        return d.getFullYear() === year && d.getMonth() === month;
-      });
-      filteredExp = expenses.filter(e => {
-        const d = new Date(e.date);
-        return d.getFullYear() === year && d.getMonth() === month;
-      });
-    }
-
-    const rangeSales = filteredTx.reduce((sum, t) => sum + t.amount, 0);
-    const rangeExpense = filteredExp.reduce((sum, e) => sum + e.amount, 0);
-    const rangeNet = rangeSales - rangeExpense;
-
-    let message = `*LAPORAN (${exportRange.toUpperCase()}) REKAP GC BANG ALL*%0A`;
-    message += `📅 Periode/Tanggal: ${selectedDate}%0A`;
-    message += `---------------------------%0A`;
-    message += `💰 *TOTAL OMSET:* Rp ${rangeSales.toLocaleString()}%0A`;
-    message += `📉 *TOTAL PENGELUARAN:* Rp ${rangeExpense.toLocaleString()}%0A`;
-    message += `✅ *PENDAPATAN BERSIH:* Rp ${rangeNet.toLocaleString()}%0A`;
-    message += `---------------------------%0A`;
-    message += `*Performa Kapster (${exportRange}):*%0A`;
-    
-    employees.forEach(emp => {
-        const empFilteredTx = filteredTx.filter(t => t.employee.toLowerCase() === emp.name.toLowerCase());
-        const empTotal = empFilteredTx.reduce((sum, t) => sum + t.amount, 0);
-        message += `👤 ${emp.name.toUpperCase()}: ${empFilteredTx.length} kepala / Rp ${empTotal.toLocaleString()}%0A`;
+    const r = buildReport(exportRange);
+    const rp = (n) => `Rp ${Number(n).toLocaleString('id-ID')}`;
+    const totalIn = r.inT + r.inQ, totalOut = r.outT + r.outQ;
+    let m = `*LAPORAN (${exportRange.toUpperCase()}) REKAP GC BANG ALL*\n`;
+    m += `📅 Periode/Tanggal: ${exportRange === 'semua' ? 'Semua data' : selectedDate}\n`;
+    m += `---------------------------\n`;
+    m += `💰 *PENDAPATAN*\n`;
+    m += `• Tunai: ${rp(r.inT)}\n• QRIS: ${rp(r.inQ)}\n• Total: ${rp(totalIn)}\n`;
+    m += `📉 *PENGELUARAN*\n`;
+    m += `• Tunai: ${rp(r.outT)}\n• QRIS: ${rp(r.outQ)}\n• Total: ${rp(totalOut)}\n`;
+    m += `• Owner: ${rp(r.outOwner)} | Kapster: ${rp(r.outKapster)}\n`;
+    m += `✅ *PENDAPATAN BERSIH: ${rp(totalIn - totalOut)}*\n`;
+    m += `• Bersih Tunai: ${rp(r.inT - r.outT)}\n• Bersih QRIS: ${rp(r.inQ - r.outQ)}\n`;
+    m += `🏦 Tabungan Ruko (setoran): ${rp(r.tabungan)}\n`;
+    m += `---------------------------\n`;
+    m += `*Performa Kapster (${exportRange}):*\n`;
+    r.perKapster.forEach(k => {
+      m += `👤 *${k.name.toUpperCase()}*: ${k.count} kepala / ${rp(k.omset)}\n`;
+      const det = fmtCounts(k.services); const ad = fmtCounts(k.addons, true);
+      if (det) m += `   ${det}${ad ? ', ' + ad : ''}\n`;
+      m += `   Tunai ${rp(k.tunai)} | QRIS ${rp(k.qris)}\n`;
+      if (k.expTotal > 0) m += `   Pengeluaran ${rp(k.expTotal)}\n`;
     });
-    
-    const waUrl = `https://wa.me/?text=${message}`;
-    window.open(waUrl, '_blank');
+
+    window.open(`https://wa.me/?text=${encodeURIComponent(m)}`, '_blank');
   };
 
   const sendSalarySlipWA = (empObj, stats, bonVal, mealVal, netSalary) => {
@@ -732,6 +772,34 @@ export default function App() {
     const outT = sum(ex.filter(e => expMethod(e) === 'Tunai')), outQ = sum(ex.filter(e => expMethod(e) === 'QRIS'));
     return { inT, inQ, outT, outQ, netT: inT - outT, netQ: inQ - outQ, net: inT + inQ - outT - outQ };
   };
+  // Kartu hitungan akhir uang di laci (dipakai di menu kapster & owner > Rekap)
+  const renderLaciCard = (title, d) => {
+    const Row = ({ l, v, c, strong, minus }) => (
+      <div className={`flex justify-between text-xs ${strong ? 'pt-2 border-t border-neutral-800' : ''}`}>
+        <span className={strong ? 'font-bold text-neutral-200' : 'text-neutral-400'}>{l}</span>
+        <span className={`font-bold ${c || 'text-white'}`}>{minus ? '− ' : ''}Rp {v.toLocaleString()}</span>
+      </div>
+    );
+    const laci = d.inT - d.outT - d.tab;
+    return (
+      <div className="bg-[#141414] border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-2">
+        <h3 className="text-sm font-bold text-emerald-400 flex items-center gap-2"><Banknote size={16} /> {title}</h3>
+        <Row l="Total Pendapatan (Tunai + QRIS)" v={d.inT + d.inQ} c="text-amber-400" />
+        <Row l="Pendapatan QRIS (tidak masuk laci)" v={d.inQ} c="text-sky-400" minus />
+        <Row l="Total Tunai Masuk" v={d.inT} strong />
+        <Row l="Pengeluaran Tunai" v={d.outT} c="text-red-400" minus />
+        <Row l="Tabungan Ruko" v={d.tab} c="text-red-400" minus />
+        <div className={`flex justify-between items-center rounded-xl px-4 py-3 mt-2 border ${laci >= 0 ? 'bg-emerald-500/10 border-emerald-500/40' : 'bg-red-500/10 border-red-500/40'}`}>
+          <span className="text-xs font-bold text-neutral-200">UANG DI LACI (AKHIR)</span>
+          <span className={`text-xl font-black ${laci >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>Rp {laci.toLocaleString()}</span>
+        </div>
+        <p className="text-[10px] text-neutral-500">
+          Pengeluaran yang dibayar QRIS (Rp {d.outQ.toLocaleString()}) tidak mengurangi laci, tapi mengurangi saldo QRIS. Saldo QRIS = Rp {(d.inQ - d.outQ).toLocaleString()}.
+        </p>
+      </div>
+    );
+  };
+
   const expSplit = (type, refStr) => {
     const list = expenses.filter(e => expInRange(e, type, refStr));
     const owner = list.filter(e => expSpender(e) === 'OWNER').reduce((sm, e) => sm + e.amount, 0);
@@ -1182,8 +1250,7 @@ export default function App() {
                         <div className="border-t border-neutral-800 pt-2"><Row l="Total Pengeluaran" v={totalExpenseAmount} c="text-red-400" /></div>
                         <div className="border-t border-neutral-800 pt-2"><Row l="Pendapatan Bersih" v={totalSales - totalExpenseAmount} c="text-emerald-400" /></div>
                         <Row l="Tabungan Ruko (setor hari ini)" v={savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0)} c="text-sky-400" />
-                        <div className="border-t border-neutral-800 pt-2"><Row l="Sisa Tunai di Laci (setelah pengeluaran & tabungan)" v={totalTunai - todayExpTunai - savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0)} c="text-emerald-400" /></div>
-                        <p className="text-[10px] text-neutral-500">Tabungan dianggap disetor dari uang tunai. Setoran tabungan tidak dicatat per kapster.</p>
+                        <p className="text-[10px] text-neutral-500">Setoran tabungan tidak dicatat per kapster. Hitungan uang di laci ada di kartu paling bawah.</p>
                         <div className="grid grid-cols-2 gap-2 pt-1">
                           <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih Tunai</span><p className="font-black text-emerald-400">Rp {(totalTunai - todayExpTunai).toLocaleString()}</p></div>
                           <div className="bg-[#141414] rounded-lg p-2 text-[11px]"><span className="text-neutral-500">Bersih QRIS</span><p className="font-black text-emerald-400">Rp {(totalQris - expQ).toLocaleString()}</p></div>
@@ -1251,6 +1318,11 @@ export default function App() {
                     })}
                   </div>
                 </div>
+
+                {renderLaciCard(`Uang di Laci Hari Ini (${activeDateForView})`, {
+                  inT: totalTunai, inQ: totalQris, outT: todayExpTunai, outQ: totalExpenseAmount - todayExpTunai,
+                  tab: savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0),
+                })}
 
               </div>
             )}
@@ -1869,6 +1941,12 @@ export default function App() {
                       <p className="text-[10px] text-neutral-500">Harian = tanggal terpilih; Mingguan = 7 hari berakhir di tanggal itu; Bulanan = bulan dari tanggal itu.</p>
                     </div>
                   );
+                })()}
+
+                {(() => {
+                  const r = methodReport(recapFilter, selectedDate);
+                  const tab = savings.filter(x => expInRange(x, recapFilter, selectedDate)).reduce((sm, x) => sm + x.amount, 0);
+                  return renderLaciCard(`Uang di Laci (${recapFilter})`, { inT: r.inT, inQ: r.inQ, outT: r.outT, outQ: r.outQ, tab });
                 })()}
 
                 {/* WEEKLY TREND CHART */}
