@@ -1741,6 +1741,47 @@ export default function App() {
                   tab: savings.filter(x => x.date === activeDateForView).reduce((sm, x) => sm + x.amount, 0),
                 })}
 
+                {(() => {
+                  const d = activeDateForView;
+                  const sum = (a) => a.reduce((x, y) => x + (y.amount || 0), 0);
+                  const rp = (n) => `Rp ${fmtId(n)}`;
+                  const tx = transactions.filter(t => t.date === d && t.payment_method !== 'QRIS');
+                  const ex = expenses.filter(e => e.date === d && expMethod(e) === 'Tunai');
+                  const sv = savings.filter(x => x.date === d);
+                  const rows = employees.filter(e => e.active).map(emp => {
+                    const masuk = sum(tx.filter(t => (t.employee || '').toLowerCase() === emp.name.toLowerCase()));
+                    const keluar = sum(ex.filter(e => expSpender(e) === emp.name.toUpperCase()));
+                    const tab = sum(sv.filter(x => (x.saver_name || '').toLowerCase() === emp.name.toLowerCase()));
+                    return { name: emp.name, masuk, keluar, tab, laci: masuk - keluar - tab };
+                  });
+                  const otherIn = sum(tx) - sum(rows.map(r => ({ amount: r.masuk })));
+                  const otherOut = sum(ex) - sum(rows.map(r => ({ amount: r.keluar })));
+                  const otherTab = sum(sv) - sum(rows.map(r => ({ amount: r.tab })));
+                  const total = sum(tx) - sum(ex) - sum(sv);
+                  return (
+                    <div className="bg-[#141414] border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-3">
+                      <h3 className="text-sm font-bold text-emerald-400 flex items-center gap-2"><Banknote size={16} /> Uang di Laci per Kapster ({d})</h3>
+                      {rows.map(r => (
+                        <div key={r.name} className="bg-black border border-neutral-800 rounded-xl p-3 space-y-1">
+                          <div className="flex justify-between items-center">
+                            <span className="font-black text-white uppercase text-sm">{r.name}</span>
+                            <span className={`font-black text-lg ${r.laci >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rp(r.laci)}</span>
+                          </div>
+                          <p className="text-[11px] text-neutral-500">tunai masuk {rp(r.masuk)} − pengeluaran {rp(r.keluar)} − tabungan {rp(r.tab)}</p>
+                        </div>
+                      ))}
+                      {otherIn > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">Tunai dari kapster lain</span><span className="font-bold text-white">{rp(otherIn)}</span></div>}
+                      {otherOut > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">− Pengeluaran owner / lainnya</span><span className="font-bold text-red-400">− {rp(otherOut)}</span></div>}
+                      {otherTab > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">− Tabungan umum (tanpa nama)</span><span className="font-bold text-red-400">− {rp(otherTab)}</span></div>}
+                      <div className={`flex justify-between items-center rounded-xl px-4 py-3 border ${total >= 0 ? 'bg-emerald-500/10 border-emerald-500/40' : 'bg-red-500/10 border-red-500/40'}`}>
+                        <span className="text-xs font-bold text-neutral-200">TOTAL UANG DI LACI</span>
+                        <span className={`text-xl font-black ${total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rp(total)}</span>
+                      </div>
+                      <p className="text-[10px] text-neutral-500">Tunai saja (QRIS tidak masuk laci). Pengeluaran dihitung atas nama yang mengeluarkan, tabungan atas nama penabung.</p>
+                    </div>
+                  );
+                })()}
+
               </div>
             )}
 
