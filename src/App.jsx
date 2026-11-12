@@ -15,6 +15,29 @@ const loadCache = () => { try { return JSON.parse(localStorage.getItem(CACHE_KEY
 const saveCache = (obj) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ...loadCache(), ...obj, ts: Date.now() })); } catch (e) {} };
 const newQid = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'q' + Date.now() + Math.random().toString(36).slice(2, 10));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Kolom nominal uang: otomatis memberi titik ribuan saat mengetik (2000 -> 2.000).
+// Mode terkontrol (ada value): value berisi angka saja, onChange menerima e.target.value berisi angka saja.
+// Mode biasa (di dalam form): isi kolom tampil berformat, baca dengan angkaDariInput().
+const digitsOnly = (v) => String(v ?? '').replace(/\D/g, '');
+const fmtThousand = (v) => { const d = digitsOnly(v); return d ? d.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''; };
+const angkaDariInput = (v) => parseFloat(digitsOnly(v)) || 0;
+function MoneyInput({ value, onChange, ...props }) {
+  const controlled = value !== undefined;
+  return (
+    <input
+      {...props}
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      {...(controlled ? { value: fmtThousand(value) } : {})}
+      onChange={(e) => {
+        if (controlled) { if (onChange) onChange({ target: { value: digitsOnly(e.target.value) } }); }
+        else { e.target.value = fmtThousand(e.target.value); }
+      }}
+    />
+  );
+}
 // Error jaringan / server sibuk = coba lagi nanti. Error lain (ditolak server) = tandai gagal.
 const isRetryable = (res) => {
   const msg = String(res?.error?.message || '');
@@ -436,7 +459,7 @@ export default function App() {
   const handleAddSavingRaw = async (e) => {
     e.preventDefault();
     const formEl = e.target;
-    const amount = parseFloat(formEl.savingAmount.value);
+    const amount = angkaDariInput(formEl.savingAmount.value);
     if (!amount) return;
     
     const saverName = (formEl.savingName?.value || '').trim();
@@ -622,7 +645,7 @@ export default function App() {
   const handleAddService = async (e) => {
     e.preventDefault();
     const name = e.target.serviceName.value;
-    const price = parseFloat(e.target.servicePrice.value);
+    const price = angkaDariInput(e.target.servicePrice.value);
     if (!name || !price) return;
     
     const { error } = await supabase.from('services').insert([{ name, price }]);
@@ -1866,7 +1889,7 @@ export default function App() {
                       <option key={emp.name} value={emp.name}>{emp.name.toUpperCase()}</option>
                     ))}
                   </select>
-                  <input name="savingAmount" type="number" min="1" placeholder="Nominal (Rp)" className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" required />
+                  <MoneyInput name="savingAmount" placeholder="Nominal (Rp)" className="w-full bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" required />
                   <button type="submit" disabled={busy} className="w-full py-3 bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 hover:bg-emerald-500/30 transition text-xs disabled:opacity-60">
                     + Simpan Tabungan
                   </button>
@@ -1927,8 +1950,7 @@ export default function App() {
                     className="w-full bg-neutral-900 border border-neutral-700 rounded-xl p-2.5 text-xs text-white outline-none"
                     required 
                   />
-                  <input 
-                    type="number" 
+                  <MoneyInput 
                     placeholder="Nominal (Rp)"
                     value={expenseAmount}
                     onChange={(e) => setExpenseAmount(e.target.value)}
@@ -2330,9 +2352,8 @@ export default function App() {
                             <option key={emp.name} value={emp.name}>Pengeluaran {emp.name.toUpperCase()}</option>
                           ))}
                         </select>
-                        <input 
-                          type="number" 
-                          placeholder="Nominal (Rp)" 
+                        <MoneyInput 
+                          placeholder="Nominal (Rp)"
                           value={expenseAmount} 
                           onChange={(e) => setExpenseAmount(e.target.value)} 
                           className="bg-black border border-neutral-800 rounded-xl p-3 text-xs text-white outline-none" 
@@ -2945,8 +2966,7 @@ export default function App() {
 
                   <div className="pt-2">
                     <label className="block text-neutral-400 mb-1">Potongan Bon / Kasbon (Rp):</label>
-                    <input 
-                      type="number"
+                    <MoneyInput 
                       value={slipBon}
                       onChange={(e) => setSlipBon(e.target.value)}
                       placeholder="0"
@@ -2956,8 +2976,7 @@ export default function App() {
 
                   <div>
                     <label className="block text-neutral-400 mb-1">Uang Makan / Saku (Rp):</label>
-                    <input 
-                      type="number"
+                    <MoneyInput 
                       value={slipMeal}
                       onChange={(e) => setSlipMeal(e.target.value)}
                       placeholder="0"
@@ -3011,7 +3030,7 @@ export default function App() {
             </div>
             <form onSubmit={handleAddService} className="flex gap-3 flex-wrap md:flex-nowrap">
               <input name="serviceName" type="text" placeholder="Nama Layanan" className="flex-1 bg-black border border-neutral-800 rounded-xl p-3 text-sm text-white" required />
-              <input name="servicePrice" type="number" placeholder="Harga (Rp)" className="w-full md:w-32 bg-black border border-neutral-800 rounded-xl p-3 text-sm text-white" required />
+              <MoneyInput name="servicePrice" placeholder="Harga (Rp)" className="w-full md:w-32 bg-black border border-neutral-800 rounded-xl p-3 text-sm text-white" required />
               <button type="submit" className="px-6 py-3 bg-amber-500 text-black font-bold rounded-xl w-full md:w-auto">Tambah</button>
             </form>
             <div className="divide-y divide-neutral-900 border-t border-neutral-800 pt-4">
