@@ -1037,13 +1037,14 @@ export default function App() {
       const outQ = sum(exList.filter(e => expMethod(e) === 'QRIS'));
       return { total: inT + inQ, inQ, outT, outQ, tabungan, laci: inT + inQ - inQ - outT - tabungan };
     };
+    const allocT = allocateTabungan(savings.filter(x => expInRange(x, type, refStr)));
     const cols = employees.filter(e => e.active).map(emp => ({
       key: emp.name,
       label: emp.name.toUpperCase(),
       d: calc(
         tx.filter(t => (t.employee || '').toLowerCase() === emp.name.toLowerCase()),
         ex.filter(e => expSpender(e) === emp.name.toUpperCase()),
-        savings.filter(x => expInRange(x, type, refStr) && (x.saver_name || '').toLowerCase() === emp.name.toLowerCase()).reduce((sm, x) => sm + x.amount, 0)
+        (allocT.per[emp.name.toLowerCase()] || { total: 0 }).total
       ),
     }));
     const ownerEx = ex.filter(e => expSpender(e) === 'OWNER');
@@ -1090,7 +1091,7 @@ export default function App() {
           </table>
         </div>
         <p className="text-[10px] text-neutral-500">
-          Rumus: total pendapatan (tunai + QRIS) − pendapatan QRIS − pengeluaran tunai − tabungan = uang tunai di laci. Tabungan yang tanpa nama (Umum) hanya mengurangi kolom TOTAL. Pengeluaran yang dibayar QRIS (Rp {totalD.outQ.toLocaleString()}) tidak mengurangi laci. Kolom OWNER muncul jika ada pengeluaran atas nama owner.
+          Rumus: total pendapatan (tunai + QRIS) − pendapatan QRIS − pengeluaran tunai − tabungan = uang tunai di laci. Tabungan tanpa nama (Umum) dibagi rata ke semua kapster aktif. Pengeluaran yang dibayar QRIS (Rp {totalD.outQ.toLocaleString()}) tidak mengurangi laci. Kolom OWNER muncul jika ada pengeluaran atas nama owner.
         </p>
       </div>
     );
@@ -1231,6 +1232,24 @@ export default function App() {
 
   // ---- Laporan gaya struk (per kapster / total) ----
   const fmtId = (n) => Number(n || 0).toLocaleString('id-ID');
+  // Tabungan atas nama kapster aktif masuk ke kapster itu; tabungan Umum (tanpa nama) dibagi rata ke semua kapster aktif
+  const allocateTabungan = (savList) => {
+    const act = employees.filter(e => e.active).map(e => e.name.toLowerCase());
+    const named = {};
+    let umum = 0;
+    savList.forEach(x => {
+      const n = (x.saver_name || '').toLowerCase();
+      if (act.includes(n)) named[n] = (named[n] || 0) + (x.amount || 0); else umum += (x.amount || 0);
+    });
+    const base = act.length ? Math.floor(umum / act.length) : 0;
+    const rem = act.length ? umum - base * act.length : 0;
+    const per = {};
+    act.forEach((n, i) => {
+      const share = base + (i === act.length - 1 ? rem : 0);
+      per[n] = { named: named[n] || 0, umum: share, total: (named[n] || 0) + share };
+    });
+    return { per, umum, leftover: act.length ? 0 : umum };
+  };
   const ADDON_PRICE = { 'Keramas': 5000, 'Kumis & Jenggot': 5000, 'Hairtonix': 25000 };
   // Pecah satu baris transaksi jadi layanan utama + tambahan beserta harganya
   const parseTxPrices = (t) => {
@@ -1317,7 +1336,10 @@ export default function App() {
   const receiptForEmployee = (empName, dateStr) => {
     const tx = transactions.filter(t => (t.employee || '').toLowerCase() === empName.toLowerCase() && t.date === dateStr);
     const ex = expenses.filter(e => e.date === dateStr && expSpender(e) === empName.toUpperCase());
-    const sv = savings.filter(x => x.date === dateStr && (x.saver_name || '').toLowerCase() === empName.toLowerCase());
+    const daySav = savings.filter(x => x.date === dateStr);
+    const sv = daySav.filter(x => (x.saver_name || '').toLowerCase() === empName.toLowerCase());
+    const share = (allocateTabungan(daySav).per[empName.toLowerCase()] || { umum: 0 }).umum;
+    if (share > 0) sv.push({ saver_name: 'umum (dibagi rata)', amount: share });
     return buildReceiptLines(empName, tx, ex, sv);
   };
   const receiptForAll = (dateStr) => buildReceiptLines(
@@ -1748,15 +1770,15 @@ export default function App() {
                   const tx = transactions.filter(t => t.date === d && t.payment_method !== 'QRIS');
                   const ex = expenses.filter(e => e.date === d && expMethod(e) === 'Tunai');
                   const sv = savings.filter(x => x.date === d);
+                  const alloc = allocateTabungan(sv);
                   const rows = employees.filter(e => e.active).map(emp => {
                     const masuk = sum(tx.filter(t => (t.employee || '').toLowerCase() === emp.name.toLowerCase()));
                     const keluar = sum(ex.filter(e => expSpender(e) === emp.name.toUpperCase()));
-                    const tab = sum(sv.filter(x => (x.saver_name || '').toLowerCase() === emp.name.toLowerCase()));
-                    return { name: emp.name, masuk, keluar, tab, laci: masuk - keluar - tab };
+                    const a = alloc.per[emp.name.toLowerCase()] || { named: 0, umum: 0, total: 0 };
+                    return { name: emp.name, masuk, keluar, named: a.named, umum: a.umum, laci: masuk - keluar - a.total };
                   });
-                  const otherIn = sum(tx) - sum(rows.map(r => ({ amount: r.masuk })));
-                  const otherOut = sum(ex) - sum(rows.map(r => ({ amount: r.keluar })));
-                  const otherTab = sum(sv) - sum(rows.map(r => ({ amount: r.tab })));
+                  const otherIn = sum(tx) - rows.reduce((x, r) => x + r.masuk, 0);
+                  const otherOut = sum(ex) - rows.reduce((x, r) => x + r.keluar, 0);
                   const total = sum(tx) - sum(ex) - sum(sv);
                   return (
                     <div className="bg-[#141414] border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-3">
@@ -1767,17 +1789,19 @@ export default function App() {
                             <span className="font-black text-white uppercase text-sm">{r.name}</span>
                             <span className={`font-black text-lg ${r.laci >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rp(r.laci)}</span>
                           </div>
-                          <p className="text-[11px] text-neutral-500">tunai masuk {rp(r.masuk)} − pengeluaran {rp(r.keluar)} − tabungan {rp(r.tab)}</p>
+                          <p className="text-[11px] text-neutral-500">
+                            tunai masuk {rp(r.masuk)} − pengeluaran {rp(r.keluar)} − tabungan {rp(r.named)}{r.umum > 0 ? ` − bagian tabungan umum ${rp(r.umum)}` : ''}
+                          </p>
                         </div>
                       ))}
                       {otherIn > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">Tunai dari kapster lain</span><span className="font-bold text-white">{rp(otherIn)}</span></div>}
                       {otherOut > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">− Pengeluaran owner / lainnya</span><span className="font-bold text-red-400">− {rp(otherOut)}</span></div>}
-                      {otherTab > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">− Tabungan umum (tanpa nama)</span><span className="font-bold text-red-400">− {rp(otherTab)}</span></div>}
+                      {alloc.leftover > 0 && <div className="flex justify-between text-xs"><span className="text-neutral-400">− Tabungan umum</span><span className="font-bold text-red-400">− {rp(alloc.leftover)}</span></div>}
                       <div className={`flex justify-between items-center rounded-xl px-4 py-3 border ${total >= 0 ? 'bg-emerald-500/10 border-emerald-500/40' : 'bg-red-500/10 border-red-500/40'}`}>
                         <span className="text-xs font-bold text-neutral-200">TOTAL UANG DI LACI</span>
                         <span className={`text-xl font-black ${total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rp(total)}</span>
                       </div>
-                      <p className="text-[10px] text-neutral-500">Tunai saja (QRIS tidak masuk laci). Pengeluaran dihitung atas nama yang mengeluarkan, tabungan atas nama penabung.</p>
+                      <p className="text-[10px] text-neutral-500">Tunai saja (QRIS tidak masuk laci). Tabungan atas nama kapster mengurangi laci kapster itu; tabungan Umum (tanpa nama) dibagi rata ke semua kapster aktif.</p>
                     </div>
                   );
                 })()}
