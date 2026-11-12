@@ -7,6 +7,21 @@ import {
 import { supabase } from './supabaseClient';
 import * as XLSX from 'xlsx';
 
+// ---- Mode offline: antrean kirim + cache data di HP ----
+const QUEUE_KEY = 'gc_offline_queue_v1';
+const CACHE_KEY = 'gc_data_cache_v1';
+const loadQueue = () => { try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); } catch (e) { return []; } };
+const loadCache = () => { try { return JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { return {}; } };
+const saveCache = (obj) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ...loadCache(), ...obj, ts: Date.now() })); } catch (e) {} };
+const newQid = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'q' + Date.now() + Math.random().toString(36).slice(2, 10));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Error jaringan / server sibuk = coba lagi nanti. Error lain (ditolak server) = tandai gagal.
+const isRetryable = (res) => {
+  const msg = String(res?.error?.message || '');
+  const st = res?.status;
+  return (typeof navigator !== 'undefined' && navigator.onLine === false) || st === 0 || st >= 500 || st === 408 || st === 429 || /failed to fetch|network|load failed|timeout|fetch/i.test(msg);
+};
+
 export default function App() {
   const [role, setRole] = useState(null); 
   const [activeTab, setActiveTab] = useState('pos'); // owner bottom nav: 'pos' (Hari Ini), 'kas' (Kas), 'gaji' (Gaji), 'recap' (Rekap), 'setting' (Setting)
@@ -23,9 +38,27 @@ export default function App() {
     { name: 'allfin', ratio: '100/0', baseSalary: 0, active: true, ownerRole: true },
     { name: 'molan', ratio: '60/40', baseSalary: 0, active: true, ownerRole: true }
   ]);
-  const [transactions, setTransactions] = useState([]);
-  const [expenses, setExpenses] = useState([]);
-  const [savings, setSavings] = useState([]);
+  const [transactionsSrv, setTransactions] = useState([]);
+  const [expensesSrv, setExpenses] = useState([]);
+  const [savingsSrv, setSavings] = useState([]);
+
+  // Antrean offline (disimpan di HP): data yang belum terkirim tetap tampil di laporan
+  const [offlineQueue, setOfflineQueue] = useState(loadQueue);
+  const queueRef = useRef(offlineQueue);
+  const flushingRef = useRef(false);
+  const [isOnline, setIsOnline] = useState(typeof navigator === 'undefined' ? true : navigator.onLine);
+  const [showQueuePanel, setShowQueuePanel] = useState(false);
+  const [flushingUi, setFlushingUi] = useState(false);
+  const pendingRows = (table, srv) => {
+    const have = new Set(srv.map(x => x.client_id).filter(Boolean));
+    return offlineQueue
+      .filter(q => q.table === table && !have.has(q.qid))
+      .map(q => ({ ...q.row, id: 'local-' + q.qid, client_id: q.qid, _pending: true, _failed: q.failed || null }))
+      .reverse();
+  };
+  const transactions = [...pendingRows('transactions', transactionsSrv), ...transactionsSrv];
+  const expenses = [...pendingRows('expenses', expensesSrv), ...expensesSrv];
+  const savings = [...pendingRows('savings', savingsSrv), ...savingsSrv];
   const [deletedLog, setDeletedLog] = useState([]); // log transaksi yang dihapus (tabel deleted_transactions)
 
   // Pengaman klik ganda: selama satu simpanan masih dikirim, tekanan berikutnya diabaikan
@@ -112,18 +145,20 @@ export default function App() {
         supabase.from('settings').select('key,value')
       ]);
       if (empRes.data && empRes.data.length > 0) {
-        setEmployees(empRes.data.map(r => ({
+        const emps = empRes.data.map(r => ({
           name: String(r.name).toLowerCase(),
           ratio: r.ratio || '60/40',
           baseSalary: Number(r.base_salary) || 0,
           active: r.active !== false,
           ownerRole: true
-        })));
+        }));
+        setEmployees(emps);
+        saveCache({ employees: emps });
       }
       if (setRes.data) {
         setRes.data.forEach(row => {
-          if (row.key === 'can_view_other_earnings') setCanViewOtherEarnings(String(row.value) === 'true');
-          if (row.key === 'wa_number' && row.value) setWaNumber(String(row.value));
+          if (row.key === 'can_view_other_earnings') { setCanViewOtherEarnings(String(row.value) === 'true'); saveCache({ canView: String(row.value) === 'true' }); }
+          if (row.key === 'wa_number' && row.value) { setWaNumber(String(row.value)); saveCache({ waNumber: String(row.value) }); }
         });
       }
     } catch (e) {
@@ -156,8 +191,30 @@ export default function App() {
     return () => clearInterval(id);
   }, [role]);
 
+  // Simpan salinan data di HP (60 hari terakhir) supaya aplikasi tetap bisa dibuka saat offline
+  const cacheServerData = ({ svc, tx, exp, sav }) => {
+    const cutoff = new Date(Date.now() - 62 * 864e5).toISOString().slice(0, 10);
+    const recent = (arr) => arr.filter(x => !x.date || x.date >= cutoff);
+    const o = {};
+    if (svc) o.services = svc;
+    if (tx) o.transactions = recent(tx);
+    if (exp) o.expenses = recent(exp);
+    if (sav) o.savings = sav;
+    saveCache(o);
+  };
+
   const fetchData = async () => {
-    setIsLoading(true);
+    const cached = loadCache();
+    if (cached.ts) {
+      if (cached.services) setServices(cached.services);
+      if (cached.transactions) setTransactions(cached.transactions);
+      if (cached.expenses) setExpenses(cached.expenses);
+      if (cached.savings) setSavings(cached.savings);
+      if (cached.employees) setEmployees(cached.employees);
+      if (typeof cached.canView === 'boolean') setCanViewOtherEarnings(cached.canView);
+      if (cached.waNumber) setWaNumber(cached.waNumber);
+      setIsLoading(false);
+    } else setIsLoading(true);
     try {
       const [svcRes, txRes, expRes, savRes] = await Promise.all([
         supabase.from('services').select('*').order('created_at', { ascending: true }),
@@ -170,6 +227,7 @@ export default function App() {
       if (txRes.data) setTransactions(txRes.data);
       if (expRes.data) setExpenses(expRes.data);
       if (savRes.data) setSavings(savRes.data);
+      cacheServerData({ svc: svcRes.data, tx: txRes.data, exp: expRes.data, sav: savRes.data });
     } catch (error) {
       console.error("Error fetching data:", error);
     } finally {
@@ -284,24 +342,25 @@ export default function App() {
       newTxs[0].amount += addonsTotal;
     }
 
-    const { error } = await supabase.from('transactions').insert(newTxs);
-    
-    if (error) {
-        alert('Gagal menyimpan transaksi: ' + error.message);
+    const res = await sendOrQueue('transactions', newTxs);
+    setServiceQty({});
+    setUseKeramas(false);
+    setUseKumis(false);
+    setHairtonixQty(0);
+    setCustomerName('');
+    if (res.failedMsg) {
+      alert('Transaksi belum bisa dikirim: ' + res.failedMsg + '\nData aman di antrean HP. Ketuk bar kuning di atas untuk melihat.');
+    } else if (res.pending) {
+      alert(`✓ Transaksi tersimpan di HP pukul ${currentTime}${newTxs.length > 1 ? ' (' + newTxs.length + ' kepala)' : ''}. Akan terkirim otomatis saat sinyal kembali.`);
     } else {
-        setServiceQty({});
-        const { data: txFresh } = await supabase.from('transactions').select('*').order('created_at', { ascending: false });
-        if (txFresh) setTransactions(txFresh);
-        setUseKeramas(false);
-        setUseKumis(false);
-        setHairtonixQty(0);
-        setCustomerName('');
-        alert(`Transaksi berhasil disimpan pada pukul ${currentTime}!${newTxs.length > 1 ? ' (' + newTxs.length + ' kepala)' : ''}`);
+      alert(`Transaksi berhasil disimpan pada pukul ${currentTime}!${newTxs.length > 1 ? ' (' + newTxs.length + ' kepala)' : ''}`);
     }
   };
 
   // Catat dulu ke log (siapa, kapan, alasan), baru hapus transaksinya.
   const logAndDeleteTransaction = async (tx, reason, by) => {
+    if (String(tx.id).startsWith('local-')) { dequeue(tx.client_id); return { error: null, logErr: null }; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return { error: { message: 'Sedang offline. Menghapus data yang sudah terkirim butuh internet.' }, logErr: null };
     const logRow = {
       date: tx.date, employee: tx.employee, customer: tx.customer, service: tx.service,
       amount: tx.amount, payment_method: tx.payment_method, transaction_time: tx.transaction_time,
@@ -350,19 +409,19 @@ export default function App() {
       expense_time: currentTime,
     };
     
-    const { error } = await supabase.from('expenses').insert([newExp]);
-    if (error) {
-        alert('Gagal menyimpan pengeluaran: ' + error.message);
-    } else {
-        setExpenseDesc('');
-        setExpenseAmount('');
-        alert(`Pengeluaran berhasil dicatat pukul ${currentTime}!`);
-    }
+    const res = await sendOrQueue('expenses', [newExp]);
+    setExpenseDesc('');
+    setExpenseAmount('');
+    if (res.failedMsg) alert('Pengeluaran belum bisa dikirim: ' + res.failedMsg + '\nData aman di antrean HP. Ketuk bar kuning di atas untuk melihat.');
+    else if (res.pending) alert(`✓ Pengeluaran tersimpan di HP pukul ${currentTime}. Akan terkirim otomatis saat sinyal kembali.`);
+    else alert(`Pengeluaran berhasil dicatat pukul ${currentTime}!`);
   };
 
   const handleDeleteExpense = async (exp) => {
     const confirmDel = window.confirm(`Yakin ingin menghapus pengeluaran "${expText(exp)}" (Rp ${exp.amount.toLocaleString()})?`);
     if (!confirmDel) return;
+    if (String(exp.id).startsWith('local-')) { dequeue(exp.client_id); return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { alert('Sedang offline. Menghapus data yang sudah terkirim butuh internet.'); return; }
 
     const { error } = await supabase.from('expenses').delete().eq('id', exp.id);
     if (error) alert('Gagal menghapus pengeluaran: ' + error.message);
@@ -382,26 +441,181 @@ export default function App() {
     
     const saverName = (formEl.savingName?.value || '').trim();
     const newSav = { date: transactionDate, amount: amount, saver_name: saverName || null };
-    const { error } = await supabase.from('savings').insert([newSav]);
-    if (error) {
-      if (/saver_name/i.test(error.message || '')) {
-        alert('Kolom nama tabungan belum ada di database.\nJalankan SQL ini sekali di Supabase (SQL Editor):\n\nalter table savings add column if not exists saver_name text;');
-      } else alert('Gagal menyimpan tabungan: ' + error.message);
-    } else {
-      formEl.reset();
-      await refreshSavings();
-      alert('Detail menabung berhasil ditambahkan!');
-    }
+    const res = await sendOrQueue('savings', [newSav]);
+    formEl.reset();
+    if (res.failedMsg) {
+      if (/saver_name/i.test(res.failedMsg)) alert('Kolom nama tabungan belum ada di database.\nJalankan SQL ini sekali di Supabase (SQL Editor):\n\nalter table savings add column if not exists saver_name text;\n\nLalu ketuk bar kuning di atas > Kirim sekarang.');
+      else alert('Tabungan belum bisa dikirim: ' + res.failedMsg + '\nData aman di antrean HP.');
+    } else if (res.pending) alert('✓ Tabungan tersimpan di HP. Akan terkirim otomatis saat sinyal kembali.');
+    else alert('Detail menabung berhasil ditambahkan!');
   };
 
   const handleDeleteSaving = async (sv) => {
     if (!window.confirm(`Hapus setoran tabungan Rp ${sv.amount.toLocaleString()} (${sv.date})?`)) return;
+    if (String(sv.id).startsWith('local-')) { dequeue(sv.client_id); return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { alert('Sedang offline. Menghapus data yang sudah terkirim butuh internet.'); return; }
     const { error } = await supabase.from('savings').delete().eq('id', sv.id);
     if (error) alert('Gagal menghapus: ' + error.message);
     else await refreshSavings();
   };
 
   const handleTransactionSubmit = guarded(handleTransactionSubmitRaw);
+
+  // ---- Mesin antrean offline ----
+  const setQueue = (arr) => {
+    queueRef.current = arr;
+    setOfflineQueue(arr);
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(arr)); } catch (e) {}
+  };
+  const dequeue = (qid) => setQueue(queueRef.current.filter(q => q.qid !== qid));
+  const markFailed = (qid, msg) => setQueue(queueRef.current.map(q => q.qid === qid ? { ...q, failed: msg } : q));
+
+  const refreshAllData = async () => {
+    try {
+      const [txRes, expRes, savRes] = await Promise.all([
+        supabase.from('transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('expenses').select('*').order('created_at', { ascending: false }),
+        supabase.from('savings').select('*').order('created_at', { ascending: false })
+      ]);
+      if (txRes.data) setTransactions(txRes.data);
+      if (expRes.data) setExpenses(expRes.data);
+      if (savRes.data) setSavings(savRes.data);
+      cacheServerData({ tx: txRes.data, exp: expRes.data, sav: savRes.data });
+    } catch (e) { /* abaikan, realtime / interval akan menyusul */ }
+  };
+
+  // Kirim 1 baris. client_id mencegah data tercatat ganda kalau pengiriman diulang.
+  const sendRow = async (item) => {
+    try {
+      let r = await supabase.from(item.table).upsert([{ ...item.row, client_id: item.qid }], { onConflict: 'client_id', ignoreDuplicates: true });
+      if (r.error && /client_id|ON CONFLICT/i.test(r.error.message || '')) {
+        r = await supabase.from(item.table).insert([item.row]); // kolom client_id belum dibuat: kirim biasa
+      }
+      if (!r.error) return { ok: true };
+      return { ok: false, retry: isRetryable(r), msg: r.error.message };
+    } catch (e) {
+      return { ok: false, retry: true, msg: String(e) };
+    }
+  };
+
+  const flushQueue = async (retryFailed = false) => {
+    if (flushingRef.current) return 0;
+    flushingRef.current = true;
+    setFlushingUi(true);
+    const done = new Set();
+    let sent = 0;
+    try {
+      while (true) {
+        const item = queueRef.current.find(q => !done.has(q.qid) && (retryFailed || !q.failed));
+        if (!item) break;
+        done.add(item.qid);
+        const res = await sendRow(item);
+        if (res.ok) { dequeue(item.qid); sent++; }
+        else if (res.retry) break; // jaringan bermasalah: berhenti, coba lagi nanti
+        else markFailed(item.qid, res.msg);
+      }
+    } finally {
+      flushingRef.current = false;
+      setFlushingUi(false);
+    }
+    if (sent > 0) await refreshAllData();
+    return sent;
+  };
+
+  // Simpan ke antrean HP dulu (aman walau aplikasi tertutup), lalu coba kirim.
+  const sendOrQueue = async (table, rows) => {
+    const items = rows.map(r => ({ qid: newQid(), table, row: r, createdAt: Date.now() }));
+    setQueue([...queueRef.current, ...items]);
+    const qids = new Set(items.map(i => i.qid));
+    await Promise.race([flushQueue(), sleep(7000)]);
+    const left = queueRef.current.filter(q => qids.has(q.qid));
+    const failed = left.find(q => q.failed);
+    return { pending: left.length > 0 && !failed, failedMsg: failed ? failed.failed : null };
+  };
+
+  useEffect(() => {
+    const goOnline = () => { setIsOnline(true); flushQueue(); fetchSettings(); };
+    const goOffline = () => setIsOnline(false);
+    const onVisible = () => { if (document.visibilityState === 'visible') flushQueue(); };
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    document.addEventListener('visibilitychange', onVisible);
+    flushQueue();
+    const timer = setInterval(() => { if (queueRef.current.some(q => !q.failed)) flushQueue(); }, 15000);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(timer);
+    };
+  }, []);
+
+  // Service worker: supaya aplikasi bisa dibuka tanpa internet (file public/sw.js)
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || window.location.protocol !== 'https:') return;
+    navigator.serviceWorker.register('/sw.js')
+      .then(() => navigator.serviceWorker.ready)
+      .then(async () => {
+        const cache = await caches.open('gc-barber-v1');
+        const urls = performance.getEntriesByType('resource').map(r => r.name).filter(u => u.startsWith(location.origin));
+        await Promise.allSettled([...new Set([location.origin + '/', ...urls])].map(u => cache.add(u)));
+      })
+      .catch(() => {});
+  }, []);
+
+  const queueLabel = (q) => {
+    const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+    if (q.table === 'transactions') return `${String(q.row.employee || '').toUpperCase()} • ${q.row.service} • ${rp(q.row.amount)} (${q.row.payment_method})`;
+    if (q.table === 'expenses') return `Pengeluaran • ${q.row.description} • ${rp(q.row.amount)}`;
+    return `Tabungan • ${q.row.saver_name ? String(q.row.saver_name).toUpperCase() : 'Umum'} • ${rp(q.row.amount)}`;
+  };
+
+  // ---- Layar HP tetap menyala (Screen Wake Lock) ----
+  const wakeLockRef = useRef(null);
+  const [layarMenyala, setLayarMenyala] = useState(false);
+  const layarInginMenyalaRef = useRef(false);
+
+  const nyalakanLayar = async () => {
+    layarInginMenyalaRef.current = true;
+    try {
+      if (!('wakeLock' in navigator)) {
+        layarInginMenyalaRef.current = false;
+        alert('HP/browser ini belum mendukung layar tetap menyala. Atur "Waktu layar mati" di pengaturan HP.');
+        return;
+      }
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLockRef.current = lock;
+      setLayarMenyala(true);
+      lock.addEventListener('release', () => { if (wakeLockRef.current === lock) setLayarMenyala(false); });
+    } catch (err) {
+      console.log('Wake lock gagal', err);
+      setLayarMenyala(false);
+    }
+  };
+
+  const matikanLayar = async () => {
+    layarInginMenyalaRef.current = false;
+    try { await wakeLockRef.current?.release(); } catch (e) {}
+    wakeLockRef.current = null;
+    setLayarMenyala(false);
+  };
+
+  // Browser melepas wake lock saat aplikasi tidak tampil: minta lagi saat kembali tampil
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && layarInginMenyalaRef.current) nyalakanLayar();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // Untuk kapster: aktif otomatis pada ketukan pertama (browser mewajibkan dipicu sentuhan), lepas saat keluar
+  useEffect(() => {
+    if (role !== 'karyawan') { if (layarInginMenyalaRef.current) matikanLayar(); return; }
+    const onFirstTap = () => { if (!wakeLockRef.current) nyalakanLayar(); };
+    window.addEventListener('pointerdown', onFirstTap, { once: true });
+    return () => window.removeEventListener('pointerdown', onFirstTap);
+  }, [role]);
   const handleAddExpense = guarded(handleAddExpenseRaw);
   const handleAddSaving = guarded(handleAddSavingRaw);
 
@@ -1225,14 +1439,67 @@ export default function App() {
               <p className="text-[10px] text-amber-500 font-bold uppercase tracking-wider">{role === 'owner' ? 'Owner Dashboard' : 'Kapster Mode'}</p>
             </div>
           </div>
-          <button 
-            onClick={() => { setRole(null); setOwnerPinInput(''); }}
-            className="p-2 text-red-400 bg-red-400/10 rounded-xl hover:bg-red-400/20 transition flex items-center gap-1 text-xs font-bold"
-          >
-            <LogOut size={16} /> Keluar
-          </button>
+          <div className="flex items-center gap-2">
+            {role === 'karyawan' && (
+              <button
+                onClick={layarMenyala ? matikanLayar : nyalakanLayar}
+                className={`p-2 rounded-xl transition text-xs font-bold ${layarMenyala ? 'bg-emerald-500/20 text-emerald-400' : 'bg-neutral-800 text-neutral-400'}`}
+              >
+                {layarMenyala ? '☀️ Layar Nyala' : '🌙 Layar Biasa'}
+              </button>
+            )}
+            <button 
+              onClick={() => { setRole(null); setOwnerPinInput(''); }}
+              className="p-2 text-red-400 bg-red-400/10 rounded-xl hover:bg-red-400/20 transition flex items-center gap-1 text-xs font-bold"
+            >
+              <LogOut size={16} /> Keluar
+            </button>
+          </div>
         </div>
       </header>
+
+      {(!isOnline || offlineQueue.length > 0) && (
+        <button
+          onClick={() => setShowQueuePanel(true)}
+          className={`w-full text-left text-xs font-bold py-2 px-4 ${offlineQueue.some(q => q.failed) ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'}`}
+        >
+          {!isOnline ? '📡 Offline' : flushingUi ? '⏳ Mengirim' : '⏳ Menunggu sinyal'}
+          {offlineQueue.length > 0
+            ? ` · ${offlineQueue.length} data belum terkirim${offlineQueue.some(q => q.failed) ? ` (${offlineQueue.filter(q => q.failed).length} gagal)` : ''} · ketuk untuk lihat`
+            : ' · transaksi tetap bisa dicatat'}
+        </button>
+      )}
+
+      {showQueuePanel && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-end sm:items-center justify-center p-4" onClick={() => setShowQueuePanel(false)}>
+          <div className="w-full max-w-md bg-[#141414] border border-[#262626] rounded-2xl p-5 space-y-3 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-bold text-white">Data Belum Terkirim ({offlineQueue.length})</h3>
+              <button onClick={() => setShowQueuePanel(false)} className="text-neutral-400 text-xs font-bold">Tutup</button>
+            </div>
+            <p className="text-[11px] text-neutral-400">{isOnline ? 'Data dikirim otomatis. Kalau ada yang gagal, periksa pesannya lalu coba kirim lagi.' : 'HP sedang offline. Data tersimpan aman di HP dan dikirim otomatis saat sinyal kembali.'}</p>
+            {offlineQueue.length === 0 && <p className="text-xs text-emerald-400">Semua data sudah terkirim ✓</p>}
+            {offlineQueue.map(q => (
+              <div key={q.qid} className="bg-black border border-neutral-800 rounded-xl p-3 space-y-1">
+                <p className="text-xs text-white font-bold">{queueLabel(q)}</p>
+                <p className="text-[10px] text-neutral-500">{q.row.date}{q.row.transaction_time ? ' ' + q.row.transaction_time : ''}</p>
+                {q.failed && <p className="text-[11px] text-red-400">Gagal: {q.failed}</p>}
+                <button
+                  onClick={() => { if (window.confirm('Buang data ini dari antrean? Data yang dibuang tidak akan terkirim.')) dequeue(q.qid); }}
+                  className="text-[11px] font-bold text-red-400"
+                >Buang</button>
+              </div>
+            ))}
+            {offlineQueue.length > 0 && (
+              <button
+                onClick={() => flushQueue(true)}
+                disabled={flushingUi}
+                className="w-full py-3 bg-amber-500 text-black font-bold rounded-xl text-xs disabled:opacity-60"
+              >{flushingUi ? 'Mengirim...' : 'Kirim sekarang'}</button>
+            )}
+          </div>
+        </div>
+      )}
 
       <main className="p-4 max-w-md sm:max-w-3xl lg:max-w-5xl mx-auto space-y-6">
         
